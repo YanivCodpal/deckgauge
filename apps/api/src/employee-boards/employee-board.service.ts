@@ -1,0 +1,405 @@
+import type { PrismaClient, Prisma } from '@deckgauge/db';
+import {
+  collectSubtreeEmployeeIds,
+  EmployeeBoardColumnConfigSchema,
+  type EmployeeBoardColumnConfig,
+  type EmployeeBoardSummaryDto,
+  type EmployeeBoardDetailDto,
+  type EmployeeColumnDto,
+} from '@deckgauge/shared';
+import { toOrgEmployeeDto } from '../org-trees/org-employee-dto.js';
+import { OrgTreeService, computeTreeRanking } from '../org-trees/org-tree.service.js';
+
+export class EmployeeBoardService {
+  private readonly orgService: OrgTreeService;
+
+  constructor(private readonly prisma: PrismaClient) {
+    this.orgService = new OrgTreeService(prisma);
+  }
+
+  async defaultGroupId(boardId: string): Promise<string> {
+    const g = await this.prisma.employeeGroup.findFirst({
+      where: { employeeBoardId: boardId },
+      orderBy: { position: 'asc' },
+    });
+    if (!g) throw new Error('board has no groups');
+    return g.id;
+  }
+
+  async createGroup(
+    boardId: string,
+    input: { name: string; color?: string }
+  ): Promise<{ id: string }> {
+    const max = await this.prisma.employeeGroup.aggregate({
+      where: { employeeBoardId: boardId },
+      _max: { position: true },
+    });
+    const g = await this.prisma.employeeGroup.create({
+      data: {
+        employeeBoardId: boardId,
+        name: input.name,
+        ...(input.color ? { color: input.color } : {}),
+        position: (max._max.position ?? -1) + 1,
+      },
+    });
+    return { id: g.id };
+  }
+
+  async updateGroup(groupId: string, input: { name?: string; color?: string }): Promise<void> {
+    await this.prisma.employeeGroup.update({
+      where: { id: groupId },
+      data: {
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.color !== undefined ? { color: input.color } : {}),
+      },
+    });
+  }
+
+  async deleteGroup(groupId: string): Promise<void> {
+    const group = await this.prisma.employeeGroup.findUnique({ where: { id: groupId } });
+    if (!group) return;
+
+    // Find the destination group: lowest-position group on the same board that isn't this one
+    let dest = await this.prisma.employeeGroup.findFirst({
+      where: { employeeBoardId: group.employeeBoardId, id: { not: groupId } },
+      orderBy: { position: 'asc' },
+    });
+
+    // No other group exists — create a fresh Ungrouped group
+    if (!dest) {
+      dest = await this.prisma.employeeGroup.create({
+        data: { employeeBoardId: group.employeeBoardId, name: 'Ungrouped', position: 0 },
+      });
+    }
+
+    // Reassign all members from the deleted group to the destination group,
+    // appending after the destination's current max position
+    const destMax = await this.prisma.employeeBoardMember.aggregate({
+      where: { employeeGroupId: dest.id },
+      _max: { position: true },
+    });
+    const basePos = (destMax._max.position ?? -1) + 1;
+
+    const members = await this.prisma.employeeBoardMember.findMany({
+      where: { employeeGroupId: groupId },
+      orderBy: { position: 'asc' },
+    });
+
+    await this.prisma.$transaction([
+      ...members.map((m, i) =>
+        this.prisma.employeeBoardMember.update({
+          where: { id: m.id },
+          data: { employeeGroupId: dest!.id, position: basePos + i },
+        })
+      ),
+      this.prisma.employeeGroup.delete({ where: { id: groupId } }),
+    ]);
+  }
+
+  async reorderGroups(order: { id: string; position: number }[]): Promise<void> {
+    await this.prisma.$transaction(
+      order.map((o) =>
+        this.prisma.employeeGroup.update({ where: { id: o.id }, data: { position: o.position } })
+      )
+    );
+  }
+
+  async addExistingMembers(boardId: string, orgEmployeeIds: string[]): Promise<void> {
+    const groupId = await this.defaultGroupId(boardId);
+    const max = await this.prisma.employeeBoardMember.aggregate({
+      where: { employeeGroupId: groupId },
+      _max: { position: true },
+    });
+    let pos = (max._max.position ?? -1) + 1;
+    await this.prisma.employeeBoardMember.createMany({
+      data: orgEmployeeIds.map((orgEmployeeId) => ({
+        employeeBoardId: boardId,
+        orgEmployeeId,
+        employeeGroupId: groupId,
+        position: pos++,
+      })),
+      skipDuplicates: true,
+    });
+  }
+
+  async addNewEmployee(
+    boardId: string,
+    input: { name: string; managerId: string | null }
+  ): Promise<{ employeeId: string; memberId: string }> {
+    const board = await this.prisma.employeeBoard.findUnique({
+      where: { id: boardId },
+      select: { orgTreeId: true },
+    });
+    if (!board) throw new Error('board not found');
+    const groupId = await this.defaultGroupId(boardId);
+    const created = await this.orgService.createEmployee(board.orgTreeId, {
+      name: input.name,
+      managerId: input.managerId,
+    });
+    const max = await this.prisma.employeeBoardMember.aggregate({
+      where: { employeeGroupId: groupId },
+      _max: { position: true },
+    });
+    const member = await this.prisma.employeeBoardMember.create({
+      data: {
+        employeeBoardId: boardId,
+        orgEmployeeId: created.id,
+        employeeGroupId: groupId,
+        position: (max._max.position ?? -1) + 1,
+      },
+    });
+    return { employeeId: created.id, memberId: member.id };
+  }
+
+  async moveMember(
+    memberId: string,
+    input: { employeeGroupId: string; position: number }
+  ): Promise<void> {
+    const member = await this.prisma.employeeBoardMember.findUnique({ where: { id: memberId } });
+    if (!member) return;
+
+    // Guard: target group must belong to the same board
+    const targetGroup = await this.prisma.employeeGroup.findUnique({
+      where: { id: input.employeeGroupId },
+    });
+    if (!targetGroup || targetGroup.employeeBoardId !== member.employeeBoardId) return;
+
+    const siblings = (
+      await this.prisma.employeeBoardMember.findMany({
+        where: { employeeGroupId: input.employeeGroupId },
+        orderBy: { position: 'asc' },
+      })
+    ).filter((s) => s.id !== memberId);
+    const ordered = [
+      ...siblings.slice(0, input.position),
+      { id: memberId, moved: true as const },
+      ...siblings.slice(input.position),
+    ];
+    await this.prisma.$transaction(
+      ordered.map((s, i) =>
+        this.prisma.employeeBoardMember.update({
+          where: { id: s.id },
+          data:
+            'moved' in s
+              ? { employeeGroupId: input.employeeGroupId, position: i }
+              : { position: i },
+        })
+      )
+    );
+  }
+
+  async removeMember(memberId: string): Promise<void> {
+    await this.prisma.employeeBoardMember.deleteMany({ where: { id: memberId } });
+  }
+
+  async setManager(employeeId: string, managerId: string | null): Promise<void> {
+    // moveEmployee re-sequences siblings; a large position reliably appends last.
+    await this.orgService.moveEmployee(employeeId, {
+      managerId,
+      position: Number.MAX_SAFE_INTEGER,
+    });
+  }
+
+  async createBoard(
+    orgTreeId: string,
+    input: { name: string; scopeEmployeeId: string | null }
+  ): Promise<{ id: string }> {
+    const employees = await this.prisma.orgEmployee.findMany({
+      where: { orgTreeId },
+      select: { id: true, name: true, managerId: true, isVacancy: true },
+    });
+    const ids = collectSubtreeEmployeeIds(employees, input.scopeEmployeeId);
+    const byId = new Map(employees.map((e) => [e.id, e]));
+    const ordered = ids.map((id) => byId.get(id)!).sort((a, b) => a.name.localeCompare(b.name));
+
+    const maxPos = await this.prisma.employeeBoard.aggregate({
+      where: { orgTreeId },
+      _max: { position: true },
+    });
+
+    const board = await this.prisma.employeeBoard.create({
+      data: {
+        orgTreeId,
+        name: input.name,
+        scopeEmployeeId: input.scopeEmployeeId,
+        position: (maxPos._max.position ?? -1) + 1,
+        groups: { create: { name: 'Ungrouped', position: 0 } },
+      },
+      include: { groups: true },
+    });
+    const ungrouped = board.groups[0]!;
+
+    if (ordered.length > 0) {
+      await this.prisma.employeeBoardMember.createMany({
+        data: ordered.map((e, i) => ({
+          employeeBoardId: board.id,
+          orgEmployeeId: e.id,
+          employeeGroupId: ungrouped.id,
+          position: i,
+        })),
+      });
+    }
+    return { id: board.id };
+  }
+
+  async listBoards(orgTreeId: string): Promise<EmployeeBoardSummaryDto[]> {
+    const rows = await this.prisma.employeeBoard.findMany({
+      where: { orgTreeId },
+      orderBy: { position: 'asc' },
+    });
+    return rows.map((b) => ({
+      id: b.id,
+      orgTreeId: b.orgTreeId,
+      name: b.name,
+      scopeEmployeeId: b.scopeEmployeeId,
+      position: b.position,
+    }));
+  }
+
+  async getBoard(
+    boardId: string,
+    opts: { includeSalary: boolean }
+  ): Promise<EmployeeBoardDetailDto | null> {
+    const board = await this.prisma.employeeBoard.findUnique({
+      where: { id: boardId },
+      include: {
+        groups: {
+          orderBy: { position: 'asc' },
+          include: {
+            members: {
+              orderBy: { position: 'asc' },
+              include: { employee: { include: { aliases: true } } },
+            },
+          },
+        },
+        columns: {
+          orderBy: { position: 'asc' },
+          include: { fieldValues: true },
+        },
+      },
+    });
+    if (!board) return null;
+    // Ranking is tree-relative: compute the leaderboard across every employee in the
+    // board's org tree (not just the board's members) so a member's rank/tier matches
+    // exactly what the org chart shows. Board membership is an arbitrary subset and must
+    // not change the min-max normalization or totalRanked.
+    const treeEmployees = await this.prisma.orgEmployee.findMany({
+      where: { orgTreeId: board.orgTreeId },
+      select: {
+        id: true,
+        isVacancy: true,
+        departedAt: true,
+        matched: true,
+        statsJson: true,
+      },
+    });
+    const rankingByEmployee = computeTreeRanking(treeEmployees);
+    const parsedConfig = EmployeeBoardColumnConfigSchema.safeParse(board.columnConfig);
+    const columnConfig = parsedConfig.success ? parsedConfig.data : null;
+    const columns: EmployeeColumnDto[] = board.columns.map((c) => ({
+      id: c.id,
+      name: c.name,
+      type: c.type as EmployeeColumnDto['type'],
+      position: c.position,
+      config: (c.config as Record<string, unknown> | null) ?? null,
+    }));
+    const valuesByEmployee = new Map<string, Record<string, string>>();
+    for (const c of board.columns) {
+      for (const fv of c.fieldValues) {
+        const rec = valuesByEmployee.get(fv.orgEmployeeId) ?? {};
+        rec[c.id] = fv.value;
+        valuesByEmployee.set(fv.orgEmployeeId, rec);
+      }
+    }
+    return {
+      id: board.id,
+      orgTreeId: board.orgTreeId,
+      name: board.name,
+      scopeEmployeeId: board.scopeEmployeeId,
+      position: board.position,
+      columnConfig,
+      columns,
+      groups: board.groups.map((g) => ({
+        id: g.id,
+        name: g.name,
+        color: g.color,
+        position: g.position,
+        members: g.members.map((m) => ({
+          id: m.id,
+          position: m.position,
+          employee: toOrgEmployeeDto(
+            m.employee,
+            m.employee.aliases,
+            opts.includeSalary,
+            rankingByEmployee.get(m.orgEmployeeId) ?? null
+          ),
+          fieldValues: valuesByEmployee.get(m.orgEmployeeId) ?? {},
+        })),
+      })),
+    };
+  }
+
+  async createColumn(
+    boardId: string,
+    input: { name: string; type: string; config?: Record<string, unknown> }
+  ): Promise<{ id: string }> {
+    const max = await this.prisma.employeeColumn.aggregate({
+      where: { employeeBoardId: boardId },
+      _max: { position: true },
+    });
+    const col = await this.prisma.employeeColumn.create({
+      data: {
+        employeeBoardId: boardId,
+        name: input.name,
+        type: input.type,
+        config: input.config as Prisma.InputJsonValue | undefined,
+        position: (max._max.position ?? -1) + 1,
+      },
+    });
+    return { id: col.id };
+  }
+
+  async updateColumn(
+    columnId: string,
+    input: { name?: string; config?: Record<string, unknown> }
+  ): Promise<void> {
+    await this.prisma.employeeColumn.update({
+      where: { id: columnId },
+      data: {
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.config !== undefined ? { config: input.config as Prisma.InputJsonValue } : {}),
+      },
+    });
+  }
+
+  async deleteColumn(columnId: string): Promise<void> {
+    await this.prisma.employeeColumn.deleteMany({ where: { id: columnId } });
+  }
+
+  async setFieldValue(
+    employeeColumnId: string,
+    orgEmployeeId: string,
+    value: string
+  ): Promise<void> {
+    await this.prisma.employeeFieldValue.upsert({
+      where: { employeeColumnId_orgEmployeeId: { employeeColumnId, orgEmployeeId } },
+      create: { employeeColumnId, orgEmployeeId, value },
+      update: { value },
+    });
+  }
+
+  async setColumnConfig(boardId: string, config: EmployeeBoardColumnConfig): Promise<void> {
+    await this.prisma.employeeBoard.update({
+      where: { id: boardId },
+      data: { columnConfig: config },
+    });
+  }
+
+  async renameBoard(boardId: string, name: string): Promise<void> {
+    await this.prisma.employeeBoard.update({ where: { id: boardId }, data: { name } });
+  }
+
+  async deleteBoard(boardId: string): Promise<void> {
+    await this.prisma.employeeBoard.delete({ where: { id: boardId } });
+  }
+}

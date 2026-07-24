@@ -1,0 +1,66 @@
+<!--
+  ClickHouse system-log control for Deckgauge staging.
+  Loaded from /etc/clickhouse-server/config.d/ — merges into the main config.
+
+  WHY THIS EXISTS
+  ───────────────
+  On 2026-06-19 the ClickHouse container sat at 200%+ CPU while serving
+  only ~6 user queries/min (well under 1s of real query time). The cost
+  was entirely ClickHouse's OWN telemetry: the built-in *_log tables
+  flush a fresh batch every second and then merge it against millions of
+  accumulated rows — none of which had a TTL. asynchronous_metric_log
+  alone had grown to 103,216,107 rows. Nothing in Deckgauge reads these
+  tables (there is no Grafana / observability stack on this box), so the
+  work was pure waste.
+
+  FIX
+  ───
+  - Disable the high-frequency / deep-profiling logs outright.
+  - Keep query_log and part_log (genuinely useful for debugging) but cap
+    them with a 3-day TTL so they can never balloon again.
+
+  Re-enable any of these by deleting the corresponding block and
+  redeploying, if you ever need the profiling data.
+-->
+<clickhouse>
+
+  <!--
+    Per-second system-metric snapshots. asynchronous_metric_log writes
+    ~hundreds of rows every second; metric_log writes one wide row every
+    second. Together they were the bulk of the constant flush+merge load.
+    Disabled via the config-merge remove="1" directive (removes the node
+    that the stock config.xml defines).
+  -->
+  <asynchronous_metric_log remove="1"/>
+  <metric_log remove="1"/>
+
+  <!--
+    Query-profiler stack samples (trace_log) and per-processor profiling
+    (processors_profile_log). Deep-debug telemetry only — not used here.
+  -->
+  <trace_log remove="1"/>
+  <processors_profile_log remove="1"/>
+
+  <!--
+    Materialized-view execution log. Deckgauge's MVs run fine without it;
+    nothing reads this table.
+  -->
+  <query_views_log remove="1"/>
+
+  <!-- Keep query_log (useful for debugging slow/failed queries) but bound it. -->
+  <query_log>
+    <database>system</database>
+    <table>query_log</table>
+    <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+  </query_log>
+
+  <!-- Keep part_log (merge/insert debugging) but bound it. -->
+  <part_log>
+    <database>system</database>
+    <table>part_log</table>
+    <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+  </part_log>
+
+</clickhouse>

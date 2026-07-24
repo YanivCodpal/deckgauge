@@ -1,0 +1,26 @@
+{
+  "name": "@deckgauge/shared",
+  "version": "0.0.1",
+  "private": true,
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./jira-config": "./src/jira-config.ts",
+    "./azure-devops-config": "./src/azure-devops-config.ts"
+  },
+  "scripts": {
+    "build": "tsc --build --force",
+    "test": "vitest run",
+    "test:integration": "vitest run src/__tests__/jira-cloud-adapter.integration.test.ts",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^25.6.0",
+    "vitest": "^4.1.4"
+  }
+}

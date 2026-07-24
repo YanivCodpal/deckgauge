@@ -1,0 +1,275 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vp-cockpit-postgres
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    command:
+      - "postgres"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "effective_cache_size=256MB"
+      - "-c"
+      - "max_connections=30"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cockpit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cockpit}
+      POSTGRES_DB: ${POSTGRES_DB:-cockpit}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cockpit} -d ${POSTGRES_DB:-cockpit}"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    container_name: vp-cockpit-clickhouse
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 3G   # server-side cap in clickhouse/config/memory.xml is 2.5 GiB (~500 MiB headroom for kernel/page cache and process overhead)
+    ports:
+      - "8123:8123"   # HTTP interface (used by @clickhouse/client and backup scripts)
+      - "9000:9000"   # Native TCP (optional, for CLI)
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/config:/etc/clickhouse-server/config.d:ro
+      - ./clickhouse/schemas:/docker-entrypoint-initdb.d:ro
+    environment:
+      CLICKHOUSE_DB: cockpit
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-cockpit}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-cockpit}
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user ${CLICKHOUSE_USER:-cockpit} --password ${CLICKHOUSE_PASSWORD:-cockpit} --query 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  redis:
+    image: redis:7-alpine
+    container_name: vp-cockpit-redis
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M   # BullMQ queue state outgrew the previous 64M cap; BGSAVE fork was OOM-killed, blocking writes via stop-writes-on-bgsave-error
+    command:
+      - "redis-server"
+      - "--save"
+      - "60"
+      - "1"
+      - "--maxmemory"
+      - "384mb"               # self-bound below the cgroup cap to leave room for the BGSAVE fork's copy-on-write pages
+      - "--maxmemory-policy"
+      - "noeviction"          # queue invariants: never evict BullMQ job keys
+      - "--loglevel"
+      - "warning"
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
+  keycloak-db:
+    image: postgres:16-alpine
+    container_name: vp-cockpit-keycloak-db
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak
+    volumes:
+      - keycloak_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: vp-cockpit-keycloak
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    entrypoint: ["/opt/keycloak/configure-microsoft-idp.sh"]
+    command: /opt/keycloak/bin/kc.sh start-dev --import-realm
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak
+      # Cap JVM heap — default uses ~1.9 GB which is excessive for local dev
+      JAVA_OPTS_APPEND: "-Xms128m -Xmx384m"
+      # Use localhost so browser redirects work; server-side calls use Docker service name
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_PORT: "8080"
+      KC_HOSTNAME_STRICT: "false"
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      # Microsoft Entra ID SSO (optional — leave blank to disable)
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+      MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:-}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm.json
+      - ./keycloak/configure-microsoft-idp.sh:/opt/keycloak/configure-microsoft-idp.sh:ro
+      - ./keycloak/themes:/opt/keycloak/themes:ro
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: vp-cockpit-api
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1536M   # Fastify API; 256M->768M->1536M. Bumped after the timesheet engine OOM'd Node ("JS heap out of memory") on a large org (~95k ADO items / ~42k with transitions): the report page now runs two engine passes — the month CapEx report AND the year-window epic breakdown — and computeTimesheet slices every span per-day, so the annual pass allocates ~12x the monthly one; several of these cached in the 60s TtlCache crossed the 768M cap. Follow-up cure: bound fetchTransitions by the window `from` and/or cap TtlCache size instead of loading all history each pass.
+    ports:
+      - "3001:3001"
+    environment:
+      # Pin V8's heap below the cgroup cap so it GCs hard instead of cgroup-OOM-killing (mirrors the web service). ~256M headroom for non-heap.
+      NODE_OPTIONS: "--max-old-space-size=1280"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-cockpit}:${POSTGRES_PASSWORD:-cockpit}@postgres:5432/${POSTGRES_DB:-cockpit}"
+      REDIS_URL: "redis://redis:6379"
+      CLICKHOUSE_URL: "http://${CLICKHOUSE_USER:-cockpit}:${CLICKHOUSE_PASSWORD:-cockpit}@clickhouse:8123/cockpit"
+      JIRA_CONFIG_PATH: "/app/config/jira.yaml"
+      KEYCLOAK_ISSUER: "http://localhost:8080/realms/vp-cockpit"
+      KEYCLOAK_JWKS_URI: "http://keycloak:8080/realms/vp-cockpit/protocol/openid-connect/certs"
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3001/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: vp-cockpit-web
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1500M   # Next.js production server; bumped 384M -> 768M -> 1500M as Phase 3 widget load + board RSC payload grew. The real cure is reducing per-mutation over-fetch (see projects.ts revalidate cleanup + page.tsx fetchAllProjects caching); this cap is the headroom band-aid.
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_OPTIONS: "--max-old-space-size=1280"
+      # Corporate networks MITM outbound TLS; the worker already runs with cert
+      # verification disabled (apps/worker/Dockerfile). The web server now also makes
+      # an outbound call to graph.microsoft.com (saveGraphToken validates the pasted
+      # token via /me), so it needs the same, or that fetch fails ("token not accepted").
+      NODE_TLS_REJECT_UNAUTHORIZED: "0"
+      API_URL: "http://api:3001"
+      NEXT_PUBLIC_API_URL: "http://localhost:3001"
+      KEYCLOAK_ISSUER: "http://localhost:8080/realms/vp-cockpit"
+      KEYCLOAK_INTERNAL_URL: "http://keycloak:8080/realms/vp-cockpit"
+      KEYCLOAK_CLIENT_ID: "vp-cockpit-web"
+      KEYCLOAK_CLIENT_SECRET: "vp-cockpit-secret"
+      NEXTAUTH_SECRET: "vp-cockpit-nextauth-secret"
+      NEXTAUTH_URL: "http://localhost:3000"
+      AUTH_TRUST_HOST: "true"
+      # Microsoft Graph "Connect" OAuth (org-tree directory sync). Empty = the
+      # Source tab shows a "not configured" note; no errors.
+      MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:-}
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+    depends_on:
+      api:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    container_name: vp-cockpit-worker
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 384M   # BullMQ host for 6+ queue+worker pairs (jira/gitlab/ado/github/sync-run-prune/roadmap-slip). The ADO processor streams large projects (azure-devops-sync.processor → streamWorkItems → promoteProjectStream): work items are fetched, dual-written to ClickHouse, and promoted one batch at a time, so even a 20k+ work-item project (Horus) never buffers its full set in memory. This kept peak usage under 384M again after the temporary 1024M bump that worked around the pre-streaming OOM.
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-cockpit}:${POSTGRES_PASSWORD:-cockpit}@postgres:5432/${POSTGRES_DB:-cockpit}"
+      REDIS_URL: "redis://redis:6379"
+      CLICKHOUSE_URL: "http://${CLICKHOUSE_USER:-cockpit}:${CLICKHOUSE_PASSWORD:-cockpit}@clickhouse:8123/cockpit"
+      JIRA_CONFIG_PATH: "/app/config/jira.yaml"
+      # Microsoft Graph app-registration creds — used to redeem each tree's stored
+      # per-user refresh token for a Graph access token during org-source sync.
+      MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:-}
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
+  # Deckgauge marketing site (commercial landing page). Self-contained static
+  # Astro build served by nginx — independent of the app stack; separate port.
+  deckgauge-site:
+    build:
+      context: ./deckgauge-site
+      dockerfile: Dockerfile
+    container_name: vp-cockpit-deckgauge-site
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    ports:
+      - "3020:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads_data:
+  keycloak_db_data:
+  clickhouse_data:

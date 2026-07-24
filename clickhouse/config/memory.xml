@@ -1,0 +1,71 @@
+<!--
+  ClickHouse memory config for Deckgauge staging (3 GB host).
+  Loaded from /etc/clickhouse-server/config.d/ — merges into the main config.
+
+  Without this file ClickHouse defaults:
+    mark_cache_size       = 5 GB   ← would OOM immediately
+    uncompressed_cache    = 8 GB   ← would OOM immediately
+    max_server_memory_usage = 80% of host RAM
+
+  With this file the server stays comfortably under 400 MB,
+  leaving the remaining ~100 MB of the Docker 500 MB limit as
+  breathing room for the process itself and page cache.
+-->
+<clickhouse>
+
+  <!--
+    Bind the HTTP and native TCP listeners to all interfaces so Docker's
+    port mappings (host 8124->container 8123, host 9001->container 9000)
+    actually reach the server. Without this, the alpine image defaults
+    to 127.0.0.1 only — host curls return "Empty reply from server" even
+    though the in-container healthcheck passes.
+  -->
+  <listen_host>0.0.0.0</listen_host>
+
+  <!--
+    Hard cap on total ClickHouse server memory.
+    Set as an absolute byte value so it isn't affected by host RAM size.
+    2.5 GiB = 2,684,354,560 bytes. Bumped from 800 MiB after observing
+    Code 241 MEMORY_LIMIT_EXCEEDED on multi-thousand-row JSONEachRow
+    inserts (github_commits sync with ~4k rows allocated >810 MiB in a
+    single request). Pair this cap with the Docker container limit
+    of 3G in docker-compose.yml. Worker-side chunking in chInsertMany
+    keeps per-request memory in the tens of MiB even with the higher cap.
+  -->
+  <max_server_memory_usage>2684354560</max_server_memory_usage>
+
+  <!--
+    Mark cache: stores index granule marks for MergeTree lookup.
+    Default 5 GB. 128 MB is plenty for staging data volumes.
+  -->
+  <mark_cache_size>134217728</mark_cache_size>
+
+  <!--
+    Uncompressed cache: caches decompressed column blocks between reads.
+    Default unlimited (auto). Cap at 256 MB for staging.
+  -->
+  <uncompressed_cache_size>268435456</uncompressed_cache_size>
+
+  <!--
+    Index granularity mark cache — used by vector similarity / full-text search.
+    Not used by Deckgauge but cap it for safety.
+  -->
+  <index_mark_cache_size>33554432</index_mark_cache_size>
+
+  <!--
+    NOTE on background pools: prior versions of this file shrank
+    background_pool_size to 2 to save memory, but ClickHouse refuses to
+    start when the pool is below the default mutation-threshold:
+      Code: 36 BAD_ARGUMENTS: 'number_of_free_entries_in_pool_to_execute_mutation' (20)
+      > 'background_pool_size' * 'background_merges_mutations_concurrency_ratio' (2)
+    Background worker thread overhead is tiny next to the cache caps
+    above (which save GBs of RAM), so we accept the default pool size
+    rather than juggle paired overrides in <merge_tree>.
+
+    NOTE on max_threads: per-query thread cap is a USER-level setting,
+    not a server config — putting it at top level triggers
+    UNKNOWN_ELEMENT_IN_CONFIG. If a per-user cap is needed, add it to
+    users.xml under <profiles><default>.
+  -->
+
+</clickhouse>

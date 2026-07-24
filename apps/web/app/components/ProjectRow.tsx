@@ -1,0 +1,176 @@
+'use client';
+
+import { BoardRow } from '@deckgauge/ui';
+import { CostClassificationCell } from './CostClassificationCell';
+import type {
+  Project,
+  ProjectStatus,
+  BoardColumn,
+  BoardOwner,
+  BoardStatus,
+} from '@deckgauge/shared';
+
+export interface ProjectRowProps {
+  project: Project;
+  onEdit?: () => void;
+  onDelete?: () => void;
+  columns?: BoardColumn[];
+  fieldValues?: Record<string, string>;
+  onFieldChange?: (columnId: string, value: string) => void;
+  onNameChange?: (name: string) => void;
+  onOwnerChange?: (owner: string) => void;
+  onResetOwnerToAssignee?: () => void;
+  ownerOptions?: string[];
+  onStatusChange?: (status: ProjectStatus) => void;
+  onStatusIdChange?: (statusId: string) => void;
+  onOwnerIdChange?: (ownerId: string | null) => void;
+  onDuplicate?: () => void;
+  onMoveToGroup?: (groupId: string) => void;
+  availableGroups?: { id: string; name: string }[];
+  selected?: boolean;
+  onSelect?: (selected: boolean) => void;
+  onExpand?: () => void;
+  commentCount?: number;
+  jiraAtlassianUrl?: string;
+  hasGitHubIntegration?: boolean;
+  adoOrgUrl?: string;
+  hasAdoIntegration?: boolean;
+  boardOwners?: BoardOwner[];
+  boardStatuses?: BoardStatus[];
+  onManageStatuses?: () => void;
+  isFocused?: boolean;
+  focusedCell?: number | null;
+  isKbSelected?: boolean;
+  onCellKeyDown?: (cellIndex: number, e: React.KeyboardEvent) => void;
+  groupColor?: string;
+  startDate?: Date | null;
+  endDate?: Date | null;
+  dueDate?: Date | null;
+  durationCode?: string | null;
+  onSystemFieldChange?: (field: 'startDate' | 'endDate' | 'dueDate' | 'durationCode', value: string) => void;
+  onCostClassificationChange?: (value: 'CAPEX' | 'OPEX' | null) => void;
+  visibleColumns?: {
+    name?: boolean;
+    owner?: boolean;
+    assignee?: boolean;
+    status?: boolean;
+    description?: boolean;
+    updated?: boolean;
+    startDate?: boolean;
+    endDate?: boolean;
+    dueDate?: boolean;
+    duration?: boolean;
+    source?: boolean;
+    classification?: boolean;
+  };
+}
+
+export function ProjectRow({
+  project,
+  onEdit,
+  onDelete,
+  columns,
+  fieldValues,
+  onFieldChange,
+  onNameChange,
+  onOwnerChange,
+  onResetOwnerToAssignee,
+  ownerOptions,
+  onStatusChange,
+  onStatusIdChange,
+  onOwnerIdChange,
+  onDuplicate,
+  onMoveToGroup,
+  availableGroups,
+  selected,
+  onSelect,
+  onExpand,
+  commentCount,
+  jiraAtlassianUrl,
+  hasGitHubIntegration,
+  adoOrgUrl,
+  hasAdoIntegration,
+  boardOwners,
+  boardStatuses,
+  onManageStatuses,
+  isFocused,
+  focusedCell,
+  isKbSelected,
+  onCellKeyDown,
+  groupColor,
+  startDate,
+  endDate,
+  dueDate,
+  durationCode,
+  onSystemFieldChange,
+  onCostClassificationChange,
+  visibleColumns,
+}: ProjectRowProps) {
+  return (
+    <BoardRow
+      id={project.id}
+      name={project.name}
+      owner={project.owner}
+      ownerId={project.ownerId}
+      assignee={project.assignee}
+      ownerOverridden={project.ownerOverridden}
+      ownerOptions={ownerOptions}
+      onResetOwnerToAssignee={onResetOwnerToAssignee}
+      status={project.status}
+      statusId={project.statusId}
+      description={project.description ?? undefined}
+      updatedAt={project.updatedAt}
+      jiraKey={project.jiraKey}
+      jiraAtlassianUrl={jiraAtlassianUrl}
+      githubIssueId={project.githubIssueId}
+      githubRepoFullName={project.githubRepoFullName}
+      hasGitHubIntegration={hasGitHubIntegration}
+      adoWorkItemId={project.adoWorkItemId}
+      adoProject={project.adoProject}
+      adoOrgUrl={adoOrgUrl}
+      hasAdoIntegration={hasAdoIntegration}
+      onEdit={onEdit}
+      onDelete={onDelete}
+      onConfirmDelete={onDelete}
+      columns={columns}
+      fieldValues={fieldValues}
+      onFieldChange={onFieldChange}
+      onOwnerChange={onOwnerChange}
+      onOwnerIdChange={onOwnerIdChange}
+      onNameChange={onNameChange}
+      onStatusChange={onStatusChange}
+      onStatusIdChange={onStatusIdChange}
+      onDuplicate={onDuplicate}
+      onMoveToGroup={onMoveToGroup}
+      availableGroups={availableGroups}
+      selected={selected}
+      onSelect={onSelect}
+      onExpand={onExpand}
+      commentCount={commentCount}
+      boardOwners={boardOwners}
+      boardStatuses={boardStatuses}
+      onManageStatuses={onManageStatuses}
+      isFocused={isFocused}
+      focusedCell={focusedCell}
+      isKbSelected={isKbSelected}
+      onCellKeyDown={onCellKeyDown}
+      groupColor={groupColor}
+      startDate={startDate}
+      endDate={endDate}
+      dueDate={dueDate}
+      durationCode={durationCode}
+      onSystemFieldChange={onSystemFieldChange}
+      visibleColumns={visibleColumns}
+      extraSystemCell={
+        project.boardId && visibleColumns?.classification !== false ? (
+          <CostClassificationCell
+            projectId={project.id}
+            boardId={project.boardId}
+            value={project.costClassification ?? null}
+            onChange={onCostClassificationChange}
+          />
+        ) : undefined
+      }
+    />
+  );
+}

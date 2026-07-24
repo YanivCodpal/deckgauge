@@ -1,0 +1,21 @@
+# Jira Configuration
+# WARNING: Do not commit the real config/jira.yaml with actual credentials to git.
+# Copy this file to config/jira.yaml and fill in your credentials.
+
+# The base URL of your Jira Cloud instance
+# Example: https://mycompany.atlassian.net
+atlassianUrl: https://mycompany.atlassian.net
+
+# Email address of the Jira user account
+# Used for Basic Auth with the API token
+email: user@example.com
+
+# Jira API token
+# Generate this at https://id.atlassian.com/manage-profile/security/api-tokens
+apiToken: your-api-token-here
+
+# List of Jira project keys to sync
+# Example: ["BWAY", "DOS"]
+projectKeys:
+  - BWAY
+  - DOS

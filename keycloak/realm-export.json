@@ -1,0 +1,29 @@
+{
+  "realm": "vp-cockpit",
+  "displayName": "Deckgauge",
+  "enabled": true,
+  "registrationAllowed": true,
+  "registrationEmailAsUsername": true,
+  "loginWithEmailAllowed": true,
+  "loginTheme": "vp-cockpit",
+  "clients": [
+    {
+      "clientId": "vp-cockpit-web",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "vp-cockpit-secret",
+      "redirectUris": ["http://localhost:3000/*", "http://localhost:3010/*"],
+      "webOrigins": ["http://localhost:3000", "http://localhost:3010"],
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "protocol": "openid-connect",
+      "attributes": {
+        "access.token.lifespan": "86400"
+      }
+    }
+  ],
+  "roles": {
+    "realm": []
+  },
+  "users": []
+}

@@ -1,0 +1,173 @@
+import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import {
+  AzureDevOpsRestAdapter,
+  BoardAdoSourceCreateSchema,
+  BoardAdoSourcePatchSchema,
+  type AzureDevOpsPort,
+} from '@deckgauge/shared';
+import { BoardAdoSourceService } from './board-ado-source.service.js';
+import { PreviewCountService, PreviewSourceNotFoundError } from './preview-count.service.js';
+import {
+  SourceStatusesService,
+  SourceStatusesNotFoundError,
+} from './source-statuses.service.js';
+import {
+  SourceIssueTypesService,
+  SourceIssueTypesNotFoundError,
+} from './source-issue-types.service.js';
+import { createTypeCache, type TypeCache } from './type-cache.js';
+import { clickhouse as defaultClickhouse } from '@deckgauge/db';
+import type { PrismaClient, ClickHouseClient } from '@deckgauge/db';
+
+// Same 60s TTL as Jira — see board-jira-source.routes.ts for rationale.
+const TYPE_CACHE_TTL_MS = 60_000;
+
+const defaultTypeCache: TypeCache = createTypeCache({ ttlMs: TYPE_CACHE_TTL_MS });
+
+async function defaultAdoAdapterFor(
+  prisma: PrismaClient,
+  instanceId: string,
+): Promise<AzureDevOpsPort> {
+  const instance = await prisma.azureDevOpsInstance.findUniqueOrThrow({
+    where: { id: instanceId },
+  });
+  return new AzureDevOpsRestAdapter({
+    orgUrl: instance.orgUrl,
+    authMethod: instance.authMethod as 'PAT' | 'BASIC',
+    accessToken: instance.accessToken,
+    username: instance.username ?? undefined,
+  });
+}
+
+export function boardAdoSourceRoutes(deps: {
+  prisma: PrismaClient;
+  clickhouse?: ClickHouseClient;
+  typeCache?: TypeCache;
+  adoAdapterFor?: (instanceId: string) => Promise<AzureDevOpsPort>;
+}) {
+  const service = new BoardAdoSourceService(deps.prisma);
+  const ch = deps.clickhouse ?? defaultClickhouse;
+  const previewSvc = new PreviewCountService({ prisma: deps.prisma, clickhouse: ch });
+  const statusesSvc = new SourceStatusesService({ prisma: deps.prisma, clickhouse: ch });
+  const issueTypesSvc = new SourceIssueTypesService({
+    prisma: deps.prisma,
+    cache: deps.typeCache ?? defaultTypeCache,
+    // Jira not used on ADO routes — see Jira routes for the symmetric comment.
+    jiraAdapterFor: () => {
+      throw new Error('jiraAdapterFor not configured on ADO routes');
+    },
+    adoAdapterFor:
+      deps.adoAdapterFor ?? ((instanceId) => defaultAdoAdapterFor(deps.prisma, instanceId)),
+    githubAdapterFor: () => {
+      throw new Error('githubAdapterFor not configured on ADO routes');
+    },
+  });
+  return async function plugin(app: FastifyInstance) {
+    app.get<{ Params: { boardId: string } }>(
+      '/boards/:boardId/sources/ado',
+      async (req, reply) => {
+        const params = z.object({ boardId: z.string().uuid() }).safeParse(req.params);
+        if (!params.success) return reply.code(400).send({ error: params.error.flatten() });
+        return service.list(params.data.boardId);
+      },
+    );
+
+    app.post<{ Params: { boardId: string } }>(
+      '/boards/:boardId/sources/ado',
+      async (req, reply) => {
+        const params = z.object({ boardId: z.string().uuid() }).safeParse(req.params);
+        if (!params.success) return reply.code(400).send({ error: params.error.flatten() });
+        const body = BoardAdoSourceCreateSchema.safeParse({
+          ...(req.body as object),
+          boardId: params.data.boardId,
+        });
+        if (!body.success) return reply.code(400).send({ error: body.error.flatten() });
+        const row = await service.attach(body.data);
+        return reply.code(201).send(row);
+      },
+    );
+
+    app.patch<{ Params: { boardId: string; id: string } }>(
+      '/boards/:boardId/sources/ado/:id',
+      async (req, reply) => {
+        const params = z
+          .object({ boardId: z.string().uuid(), id: z.string().uuid() })
+          .safeParse(req.params);
+        if (!params.success) return reply.code(400).send({ error: params.error.flatten() });
+        const body = BoardAdoSourcePatchSchema.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: body.error.flatten() });
+        return service.update(params.data.id, body.data);
+      },
+    );
+
+    app.delete<{ Params: { boardId: string; id: string } }>(
+      '/boards/:boardId/sources/ado/:id',
+      async (req, reply) => {
+        const params = z
+          .object({ boardId: z.string().uuid(), id: z.string().uuid() })
+          .safeParse(req.params);
+        if (!params.success) return reply.code(400).send({ error: params.error.flatten() });
+        await service.detach(params.data.id);
+        return reply.code(204).send();
+      },
+    );
+
+    app.get<{ Params: { boardId: string; id: string } }>(
+      '/boards/:boardId/sources/ado/:id/preview-count',
+      async (req, reply) => {
+        const params = z
+          .object({ boardId: z.string().uuid(), id: z.string().uuid() })
+          .safeParse(req.params);
+        if (!params.success) return reply.code(400).send({ error: params.error.flatten() });
+        try {
+          return await previewSvc.countAdoWorkItems(params.data.id);
+        } catch (err) {
+          if (err instanceof PreviewSourceNotFoundError) {
+            return reply.code(404).send({ error: err.message });
+          }
+          throw err;
+        }
+      },
+    );
+
+    app.get<{ Params: { boardId: string; id: string } }>(
+      '/boards/:boardId/sources/ado/:id/source-statuses',
+      async (req, reply) => {
+        const params = z
+          .object({ boardId: z.string().uuid(), id: z.string().uuid() })
+          .safeParse(req.params);
+        if (!params.success) return reply.code(400).send({ error: params.error.flatten() });
+        try {
+          const statuses = await statusesSvc.listAdo(params.data.id);
+          return { statuses };
+        } catch (err) {
+          if (err instanceof SourceStatusesNotFoundError) {
+            return reply.code(404).send({ error: err.message });
+          }
+          throw err;
+        }
+      },
+    );
+
+    app.get<{ Params: { boardId: string; id: string } }>(
+      '/boards/:boardId/sources/ado/:id/work-item-types',
+      async (req, reply) => {
+        const params = z
+          .object({ boardId: z.string().uuid(), id: z.string().uuid() })
+          .safeParse(req.params);
+        if (!params.success) return reply.code(400).send({ error: params.error.flatten() });
+        try {
+          const types = await issueTypesSvc.listAdo(params.data.boardId, params.data.id);
+          reply.header('Cache-Control', 'max-age=60, must-revalidate');
+          return { types };
+        } catch (err) {
+          if (err instanceof SourceIssueTypesNotFoundError) {
+            return reply.code(404).send({ error: err.message });
+          }
+          throw err;
+        }
+      },
+    );
+  };
+}

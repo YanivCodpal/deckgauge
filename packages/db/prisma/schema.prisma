@@ -1,0 +1,1316 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ProjectStatus {
+  NOT_STARTED @map("Not started")
+  IN_PROGRESS @map("In progress")
+  AT_RISK     @map("At risk")
+  BLOCKED     @map("Blocked")
+  DONE        @map("Done")
+
+  @@map("project_status")
+}
+
+enum CostClassification {
+  CAPEX
+  OPEX
+
+  @@map("cost_classification")
+}
+
+enum SyncRunStatus {
+  PENDING   @map("pending")
+  COMPLETED @map("completed")
+  FAILED    @map("failed")
+
+  @@map("sync_run_status")
+}
+
+enum SyncRunTrigger {
+  STARTUP   @map("startup")
+  MANUAL    @map("manual")
+  SCHEDULED @map("scheduled")
+
+  @@map("sync_run_trigger")
+}
+
+enum ColumnType {
+  TEXT     @map("text")
+  STATUS   @map("status")
+  DATE     @map("date")
+  NUMBER   @map("number")
+  CHECKBOX @map("checkbox")
+  DROPDOWN @map("dropdown")
+  PERSON   @map("person")
+  LINK     @map("link")
+
+  @@map("column_type")
+}
+
+enum AzureDevOpsAuthMethod {
+  PAT   @map("pat")
+  BASIC @map("basic")
+
+  @@map("azure_devops_auth_method")
+}
+
+enum SyncSource {
+  ADO
+  GITHUB
+  JIRA
+  GITLAB
+
+  @@map("sync_source")
+}
+
+enum TimesheetRuleScope {
+  ROLE
+  EMPLOYEE
+
+  @@map("timesheet_rule_scope")
+}
+
+model Board {
+  id                String   @id @default(uuid())
+  name              String
+  description       String?
+  // Board template the board was seeded from / behaves as. "development" = the
+  // historical default board (dashboard + roadmap); "blank" = empty board;
+  // "recruitment" = a candidate pipeline (seeded groups/columns + opt-in
+  // calendar/onboard capabilities). Drives boardCapabilities() gating.
+  kind              String   @default("development")
+  // Phase 3 (EI-001): ticket-key prefixes the board cares about (e.g. ["BWAY","DOS"]).
+  // Used by the intelligence layer to scope ClickHouse queries to the boards
+  // that should see a given linked_ticket_keys[] entry.
+  ticketKeyPrefixes  String[] @default([]) @map("ticket_key_prefixes")
+  hiddenSystemFields String[] @default(["startDate", "endDate", "duration"]) @map("hidden_system_fields")
+  // Monday-style per-board grid layout: { hidden: string[], widths: Record<colKey, number> }.
+  // Column keys are the SYSTEM_COLUMN_KEYS (packages/shared) or a custom BoardColumn.id.
+  columnLayout       Json?    @map("column_layout")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  groups             Group[]
+  projects           Project[]
+  columns            BoardColumn[]
+  automations        AutomationRule[]
+  // Phase 3 multi-board sync: one row per (board × project-sync).
+  boardJiraSources   BoardJiraSource[]
+  boardGithubSources BoardGitHubSource[]
+  boardAdoSources    BoardAdoSource[]
+  boardGitlabSources BoardGitLabSource[]
+  owners             BoardOwner[]
+  statuses           BoardStatus[]
+  accessEntries      BoardAccess[]
+  views              BoardView[]
+  userPrefs          UserBoardPref[]
+  syncExclusions     BoardSyncExclusion[]
+  roadmapSubscriptions RoadmapBoardSubscription[]
+  calendarEvents     BoardCalendarEvent[]
+  comparisonMemberships ComparisonMember[]
+  calendarSource     BoardCalendarSource?
+
+  @@map("boards")
+}
+
+model BoardCalendarEvent {
+  id        String   @id @default(uuid())
+  boardId   String?  @map("board_id") // null = global event
+  label     String   @db.VarChar(120)
+  kind      String   @db.VarChar(20) // 'freeze' | 'migration' | 'holiday'
+  startsAt  DateTime @map("starts_at")
+  endsAt    DateTime @map("ends_at")
+  color     String?  @db.VarChar(20)
+  createdAt DateTime @default(now()) @map("created_at")
+  board     Board?   @relation(fields: [boardId], references: [id], onDelete: Cascade)
+
+  @@index([boardId])
+  @@map("board_calendar_events")
+}
+
+model BoardOwner {
+  id        String   @id @default(uuid())
+  boardId   String   @map("board_id")
+  name      String   @db.VarChar(100)
+  color     String   @db.VarChar(7)
+  order     Int      @default(0)
+  userId    String?  @map("user_id")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  board    Board     @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  user     User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  projects Project[]
+
+  @@unique([boardId, name])
+  @@index([boardId])
+  @@index([userId])
+  @@map("board_owners")
+}
+
+model BoardStatus {
+  id        String   @id @default(uuid())
+  boardId   String   @map("board_id")
+  label     String   @db.VarChar(50)
+  color     String   @db.VarChar(7)
+  icon      String?  @db.VarChar(10)
+  order     Int      @default(0)
+  isDefault Boolean  @default(false) @map("is_default")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  board    Board     @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  projects Project[]
+
+  @@unique([boardId, label])
+  @@index([boardId])
+  @@map("board_statuses")
+}
+
+model BoardSyncExclusion {
+  id         String     @id @default(uuid())
+  boardId    String     @map("board_id")
+  source     SyncSource
+  externalId String     @map("external_id")
+  excludedAt DateTime   @default(now()) @map("excluded_at")
+  excludedBy String?    @map("excluded_by")
+
+  board Board @relation(fields: [boardId], references: [id], onDelete: Cascade)
+
+  @@unique([boardId, source, externalId])
+  @@index([boardId, source])
+  @@map("board_sync_exclusions")
+}
+
+model Group {
+  id        String   @id @default(uuid())
+  name      String
+  position  Int      @default(0)
+  color     String   @default("#6C6CFF")
+  boardId   String   @map("board_id")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  board              Board               @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  projects           Project[]
+  // Phase 3 multi-board sync target-group relations.
+  boardJiraSources   BoardJiraSource[]
+  boardGithubSources BoardGitHubSource[]
+  boardAdoSources    BoardAdoSource[]
+  boardGitlabSources BoardGitLabSource[]
+  roadmapGroups      RoadmapGroup[]
+
+  @@index([boardId, position])
+  @@map("groups")
+}
+
+model Project {
+  id                      String              @id @default(uuid())
+  name                    String
+  owner                   String
+  assignee                String              @default("")
+  ownerOverridden         Boolean             @default(false) @map("owner_overridden")
+  status                  ProjectStatus
+  description             String?
+  boardId                 String?             @map("board_id")
+  groupId                 String?             @map("group_id")
+  ownerId                 String?             @map("owner_id")
+  statusId                String?             @map("status_id")
+  order                   Float?
+  jiraKey                 String?             @map("jira_key")
+  jiraProjectKey          String?             @map("jira_project_key")
+  jiraType                String?             @map("jira_type")
+  jiraSyncedFields        Json?               @map("jira_synced_fields")
+  jiraRemovedFromSource   Boolean             @default(false) @map("jira_removed_from_source")
+  githubIssueId           String?             @map("github_issue_id")
+  githubRepoFullName      String?             @map("github_repo_full_name")
+  githubSyncedFields      String[]            @default([]) @map("github_synced_fields")
+  githubRemovedFromSource Boolean             @default(false) @map("github_removed_from_source")
+  adoWorkItemId           Int?                @map("ado_work_item_id")
+  adoProject              String?             @map("ado_project")
+  adoSyncedFields         Json?               @map("ado_synced_fields")
+  adoRemovedFromSource    Boolean             @default(false) @map("ado_removed_from_source")
+  roadmapPinnedStart      DateTime?           @map("roadmap_pinned_start")
+  startDate               DateTime?           @map("start_date")
+  endDate                 DateTime?           @map("end_date")
+  dueDate                 DateTime?           @map("due_date")
+  durationCode            String?             @map("duration_code")
+  costClassification      CostClassification? @map("cost_classification")
+  // Recruitment: set when a candidate row has been onboarded into an org tree as an
+  // OrgEmployee. Loosely references OrgEmployee.id; guards against double-onboarding.
+  onboardedEmployeeId     String?             @map("onboarded_employee_id")
+  // Recruitment calendar ingest: the Microsoft-calendar event this candidate row was
+  // created from. Null for normal rows; unique per board so re-syncs update, not
+  // duplicate. Postgres treats NULLs as distinct, so many null rows coexist.
+  calendarEventId         String?             @map("calendar_event_id")
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
+
+  board         Board?                @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  group         Group?                @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  boardOwner    BoardOwner?           @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  boardStatus   BoardStatus?          @relation(fields: [statusId], references: [id], onDelete: Cascade)
+  fieldValues   ProjectFieldValue[]
+  comments      ProjectComment[]
+  uploads       Upload[]
+  statusChanges ProjectStatusChange[]
+
+  @@unique([jiraKey, jiraProjectKey])
+  @@unique([boardId, adoWorkItemId])
+  @@unique([boardId, githubIssueId])
+  @@unique([boardId, calendarEventId])
+  @@index([boardId, status])
+  @@index([boardId, updatedAt])
+  @@index([boardId, ownerId])
+  @@index([groupId, order])
+  @@map("projects")
+}
+
+model ProjectComment {
+  id           String   @id @default(uuid())
+  projectId    String   @map("project_id")
+  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  content      Json
+  authorName   String   @default("VP") @map("author_name")
+  authorAvatar String?  @map("author_avatar")
+  pinned       Boolean  @default(false)
+  authorId     String?  @map("author_id")
+  author       User?    @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  uploads Upload[]
+
+  @@index([projectId, pinned, createdAt])
+  @@index([authorId])
+  @@map("project_comments")
+}
+
+model BoardColumn {
+  id      String     @id @default(uuid())
+  boardId String
+  name    String
+  type    ColumnType
+  order   Int        @default(0)
+  config  Json?
+
+  board       Board               @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  fieldValues ProjectFieldValue[]
+
+  @@index([boardId, order])
+  @@map("board_columns")
+}
+
+model ProjectFieldValue {
+  id        String @id @default(uuid())
+  projectId String
+  columnId  String
+  value     String
+
+  project Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  column  BoardColumn @relation(fields: [columnId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, columnId])
+  @@map("project_field_values")
+}
+
+model AutomationRule {
+  id        String   @id @default(uuid())
+  boardId   String   @map("board_id")
+  name      String
+  trigger   Json
+  action    Json
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  board Board @relation(fields: [boardId], references: [id], onDelete: Cascade)
+
+  @@map("automation_rules")
+}
+
+model JiraInstance {
+  id           String   @id @default(uuid())
+  name         String
+  atlassianUrl String
+  email        String
+  apiToken     String
+  projectKeys  String[]
+  createdAt    DateTime @default(now())
+
+  projectSyncs JiraProjectSync[] // Phase 3
+
+  @@map("jira_instances")
+}
+
+model SyncRun {
+  id            String         @id @default(uuid())
+  status        SyncRunStatus
+  trigger       SyncRunTrigger
+  startedAt     DateTime       @default(now())
+  finishedAt    DateTime?
+  errorMessage  String?
+  epicCount     Int            @default(0)
+  issueCount    Int            @default(0)
+  source        String?
+  workItemCount Int            @default(0) @map("work_item_count")
+
+  // Phase 3: link a sync run to the new project-sync models. All
+  // optional and unscoped (no FK constraint) so legacy *SyncConfig-based
+  // runs continue to write rows without touching these fields.
+  jiraProjectSyncId        String? @map("jira_project_sync_id")
+  githubRepoSyncId         String? @map("github_repo_sync_id")
+  azureDevOpsProjectSyncId String? @map("azure_devops_project_sync_id")
+  gitlabProjectSyncId      String? @map("gitlab_project_sync_id")
+
+  @@index([startedAt])
+  @@index([status])
+  @@map("sync_runs")
+}
+
+model Upload {
+  id        String          @id @default(uuid())
+  filename  String
+  mimeType  String          @map("mime_type")
+  sizeBytes Int             @map("size_bytes")
+  commentId String?         @map("comment_id")
+  comment   ProjectComment? @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  projectId String?  @map("project_id")
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  orgEmployeeId     String?             @map("org_employee_id")
+  orgEmployee       OrgEmployee?        @relation(fields: [orgEmployeeId], references: [id], onDelete: Cascade)
+  employeeCommentId String?             @map("employee_comment_id")
+  employeeComment   OrgEmployeeComment? @relation(fields: [employeeCommentId], references: [id], onDelete: Cascade)
+  createdAt DateTime        @default(now()) @map("created_at")
+
+  @@index([projectId])
+  @@index([commentId])
+  @@index([orgEmployeeId])
+  @@index([employeeCommentId])
+  @@map("uploads")
+}
+
+model GitHubInstance {
+  id          String   @id @default(uuid())
+  baseUrl     String   @default("https://api.github.com") @map("base_url")
+  accessToken String   @map("access_token")
+  org         String   @default("")
+  // DEPRECATED — read-only. Use GitHubRepoSync rows instead. Backfilled by
+  // migration <ts>_github_bulk_repo_ingestion. Kept for one release for safety.
+  repos       String[]
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  repoSyncs GitHubRepoSync[] // Phase 3
+
+  @@map("github_instances")
+}
+
+model AzureDevOpsInstance {
+  id          String                @id @default(uuid())
+  name        String
+  orgUrl      String                @map("org_url")
+  authMethod  AzureDevOpsAuthMethod @map("auth_method")
+  accessToken String                @map("access_token")
+  username    String?
+  projects    String[]
+  createdAt   DateTime              @default(now()) @map("created_at")
+  updatedAt   DateTime              @updatedAt @map("updated_at")
+
+  projectSyncs AzureDevOpsProjectSync[] // Phase 3
+
+  @@map("azure_devops_instances")
+}
+
+enum BoardAccessRole {
+  OWNER
+  EDITOR
+  VIEWER
+
+  @@map("board_access_role")
+}
+
+enum BoardViewType {
+  BOARD      @map("board")
+  DASHBOARD  @map("dashboard")
+  ROADMAP    @map("roadmap")
+  COMPARISON @map("comparison")
+
+  @@map("board_view_type")
+}
+
+
+model User {
+  id         String   @id @default(uuid())
+  keycloakId String   @unique @map("keycloak_id")
+  email      String   @unique
+  name       String
+  avatarUrl  String?  @map("avatar_url")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  boardAccess       BoardAccess[]
+  boardOwners       BoardOwner[]
+  comments          ProjectComment[]
+  developerProfiles DeveloperProfile[]
+  boardFolders      BoardFolder[]
+  boardPrefs        UserBoardPref[]
+  roadmapAccess     RoadmapAccess[]
+  roadmapPrefs      UserRoadmapPref[]
+  employeeComments  OrgEmployeeComment[]
+
+  @@map("users")
+}
+
+model DeveloperProfile {
+  id          String   @id @default(uuid())
+  provider    String   @db.VarChar(32)
+  login       String   @db.VarChar(256)
+  displayName String?  @map("display_name") @db.VarChar(256)
+  avatarUrl   String?  @map("avatar_url")
+  email       String?  @db.VarChar(320)
+  userId      String?  @map("user_id")
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@unique([provider, login])
+  @@index([userId])
+  @@index([email])
+  @@map("developer_profiles")
+}
+
+model BoardAccess {
+  id        String          @id @default(uuid())
+  boardId   String          @map("board_id")
+  userId    String          @map("user_id")
+  role      BoardAccessRole
+  createdAt DateTime        @default(now()) @map("created_at")
+  updatedAt DateTime        @updatedAt @map("updated_at")
+
+  board Board @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([boardId, userId])
+  @@index([boardId])
+  @@index([userId])
+  @@map("board_access")
+}
+
+model BoardView {
+  id        String        @id @default(uuid())
+  boardId   String        @map("board_id")
+  type      BoardViewType
+  name      String        @db.VarChar(100)
+  position  Int           @default(0)
+  presetKey String?       @map("preset_key") @db.VarChar(50)
+  createdAt DateTime      @default(now()) @map("created_at")
+  updatedAt DateTime      @updatedAt @map("updated_at")
+
+  board              Board               @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  widgets            DashboardWidget[]
+  roadmapConfigGantt RoadmapConfig?      @relation("RoadmapGanttConfig")
+
+  @@index([boardId])
+  @@index([presetKey])
+  @@map("board_views")
+}
+
+// Multi-board comparison: a first-class, standalone entity (reached through the
+// Comparisons category, not a board tab). Owned by its creator, like Roadmap;
+// kept lean like OrgTree (no per-entity ACL / favorites). Its member boards are
+// the developers' boards being compared.
+model Comparison {
+  id        String   @id @default(uuid())
+  name      String   @db.VarChar(100)
+  createdBy String   @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  members ComparisonMember[]
+
+  @@index([createdBy])
+  @@map("comparisons")
+}
+
+// The ordered board set for a Comparison. FK cascade so deleting the comparison
+// or a member board cleans up its rows.
+model ComparisonMember {
+  id           String   @id @default(uuid())
+  comparisonId String   @map("comparison_id")
+  boardId      String   @map("board_id")
+  position     Int      @default(0)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  comparison Comparison @relation(fields: [comparisonId], references: [id], onDelete: Cascade)
+  board      Board      @relation(fields: [boardId], references: [id], onDelete: Cascade)
+
+  @@unique([comparisonId, boardId])
+  @@index([comparisonId, position])
+  @@map("comparison_members")
+}
+
+
+model RoadmapConfig {
+  id               String    @id @default(uuid())
+  boardViewId      String    @unique @map("board_view_id")
+  boardView        BoardView @relation("RoadmapGanttConfig", fields: [boardViewId], references: [id], onDelete: Cascade)
+  startDate        DateTime  @map("start_date")
+  visibleQuarters  Int       @default(4) @map("visible_quarters")
+  sizeDurations    Json      @map("size_durations")
+  defaultSizeWeeks Float     @default(2) @map("default_size_weeks")
+  hiddenGroupIds   Json      @default("[]") @map("hidden_group_ids")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  @@map("roadmap_configs")
+}
+
+model DashboardWidget {
+  id          String   @id @default(uuid())
+  boardViewId String   @map("board_view_id")
+  widgetType  String   @map("widget_type") @db.VarChar(50)
+  title       String   @db.VarChar(100)
+  config      Json     @default("{}")
+  layout      Json     @default("{}")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  boardView BoardView @relation(fields: [boardViewId], references: [id], onDelete: Cascade)
+
+  @@index([boardViewId])
+  @@map("dashboard_widgets")
+}
+
+model ProjectStatusChange {
+  id         String   @id @default(uuid())
+  projectId  String   @map("project_id")
+  fromStatus String?  @map("from_status")
+  toStatus   String   @map("to_status")
+  changedAt  DateTime @default(now()) @map("changed_at")
+  changedBy  String?  @map("changed_by")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, changedAt])
+  @@index([toStatus, changedAt])
+  @@map("project_status_changes")
+}
+
+// ============================================================================
+// Phase 3 (EI-001) — multi-board sync models per planning/MULTI-BOARD-SYNC.md.
+// Adds new tables only; legacy *SyncConfig models stay through Sprint 2 (EI-016c)
+// for backwards compatibility while workers migrate over.
+// ============================================================================
+
+// GitLab support is brand new in Phase 3 — the underlying Instance model
+// didn't exist yet. Pattern mirrors GitHubInstance.
+model GitLabInstance {
+  id          String   @id @default(uuid())
+  name        String
+  baseUrl     String   @default("https://gitlab.com/api/v4") @map("base_url")
+  accessToken String   @map("access_token")
+  projects    String[]
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  projectSyncs GitLabProjectSync[]
+
+  @@map("gitlab_instances")
+}
+
+// ── Jira ──────────────────────────────────────────────────────────────────────
+
+model JiraProjectSync {
+  id             String @id @default(uuid())
+  jiraInstanceId String @map("jira_instance_id")
+  jiraProjectKey String @map("jira_project_key")
+
+  syncChangelog Boolean @default(true) @map("sync_changelog")
+  syncWorklogs  Boolean @default(false) @map("sync_worklogs")
+
+  lastSyncedAt DateTime? @map("last_synced_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  jiraInstance JiraInstance      @relation(fields: [jiraInstanceId], references: [id], onDelete: Cascade)
+  boardSources BoardJiraSource[]
+
+  @@unique([jiraInstanceId, jiraProjectKey])
+  @@map("jira_project_syncs")
+}
+
+model BoardJiraSource {
+  id                String  @id @default(uuid())
+  boardId           String  @map("board_id")
+  jiraProjectSyncId String  @map("jira_project_sync_id")
+  targetGroupId     String? @map("target_group_id")
+
+  allowedIssueTypes   String[] @default([]) @map("allowed_issue_types")
+  jqlFilter           String?  @map("jql_filter")
+  fieldMappings       Json     @default("{}") @map("field_mappings")
+  defaultSyncedFields Json     @default("[\"name\",\"status\",\"owner\"]") @map("default_synced_fields")
+  statusMapping       Json     @default("{}") @map("status_mapping")
+
+  lastPromotedAt DateTime? @map("last_promoted_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  board           Board           @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  jiraProjectSync JiraProjectSync @relation(fields: [jiraProjectSyncId], references: [id], onDelete: Cascade)
+  targetGroup     Group?          @relation(fields: [targetGroupId], references: [id], onDelete: SetNull)
+
+  @@unique([boardId, jiraProjectSyncId])
+  @@index([boardId])
+  @@index([jiraProjectSyncId])
+  @@map("board_jira_sources")
+}
+
+// ── GitHub ────────────────────────────────────────────────────────────────────
+
+model GitHubRepoSync {
+  id                       String   @id @default(cuid())
+  githubInstanceId         String   @map("github_instance_id")
+  repoFullName             String   @map("repo_full_name")
+  defaultBranch            String   @default("main") @map("default_branch")
+  archived                 Boolean  @default(false)
+  language                 String?
+  topics                   String[] @default([])
+  lastPushedAt             DateTime? @map("last_pushed_at")
+  openIssuesCount          Int      @default(0) @map("open_issues_count")
+
+  tier                     String   @default("warm") // hot | warm | cold
+
+  prsWatermark             DateTime? @map("prs_watermark")
+  commitsWatermark         DateTime? @map("commits_watermark")
+  reviewsWatermark         DateTime? @map("reviews_watermark")
+  workflowRunsWatermark    DateTime? @map("workflow_runs_watermark")
+  deploymentsWatermark     DateTime? @map("deployments_watermark")
+  issuesWatermark          DateTime? @map("issues_watermark")
+
+  backfillMonths           Int      @default(12) @map("backfill_months")
+  backfillCompleteAt       DateTime? @map("backfill_complete_at")
+
+  lastSuccessAt            DateTime? @map("last_success_at")
+  lastErrorAt              DateTime? @map("last_error_at")
+  lastErrorMessage         String?  @map("last_error_message")
+
+  disabledAt               DateTime? @map("disabled_at")
+
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @updatedAt @map("updated_at")
+
+  githubInstance GitHubInstance      @relation(fields: [githubInstanceId], references: [id], onDelete: Cascade)
+  boardSources   BoardGitHubSource[]
+
+  @@unique([githubInstanceId, repoFullName])
+  @@index([tier, lastSuccessAt])
+  @@index([disabledAt])
+  @@map("github_repo_syncs")
+}
+
+model PrJiraLink {
+  id           String   @id @default(cuid())
+  prId         String   @map("pr_id")
+  repoFullName String   @map("repo_full_name")
+  jiraKey      String   @map("jira_key")
+  source       String                            // "pr_title" | "commit_message"
+  mergedAt     DateTime? @map("merged_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([prId, jiraKey, source])
+  @@index([jiraKey])
+  @@index([repoFullName])
+  @@map("pr_jira_links")
+}
+
+model BoardGitHubSource {
+  id               String  @id @default(uuid())
+  boardId          String  @map("board_id")
+  gitHubRepoSyncId String  @map("github_repo_sync_id")
+  targetGroupId    String? @map("target_group_id")
+
+  syncIssuesToBoard   Boolean  @default(true) @map("sync_issues_to_board")
+  useForIntelligence  Boolean  @default(true) @map("use_for_intelligence")
+  allowedLabels       String[] @default([]) @map("allowed_labels")
+  allowedTypes        String[] @default([]) @map("allowed_types")
+  includeClosedIssues Boolean  @default(false) @map("include_closed_issues")
+  statusMapping       Json     @default("{}") @map("status_mapping")
+  defaultSyncedFields String[] @default(["name", "description", "status", "owner"]) @map("default_synced_fields")
+
+  lastPromotedAt DateTime? @map("last_promoted_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  board          Board          @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  gitHubRepoSync GitHubRepoSync @relation(fields: [gitHubRepoSyncId], references: [id], onDelete: Cascade)
+  targetGroup    Group?         @relation(fields: [targetGroupId], references: [id], onDelete: SetNull)
+
+  @@unique([boardId, gitHubRepoSyncId])
+  @@index([boardId])
+  @@map("board_github_sources")
+}
+
+// ── Azure DevOps ──────────────────────────────────────────────────────────────
+
+model AzureDevOpsProjectSync {
+  id                    String @id @default(uuid())
+  azureDevOpsInstanceId String @map("azure_devops_instance_id")
+  adoProject            String @map("ado_project")
+
+  syncPrs      Boolean  @default(false) @map("sync_prs")
+  syncCommits  Boolean  @default(false) @map("sync_commits")
+  syncRepos    String[] @default([]) @map("sync_repos")
+  syncAllRepos Boolean  @default(false) @map("sync_all_repos")
+
+  lastSyncedAt DateTime? @map("last_synced_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  azureDevOpsInstance AzureDevOpsInstance @relation(fields: [azureDevOpsInstanceId], references: [id], onDelete: Cascade)
+  boardSources        BoardAdoSource[]
+  repoSyncStates      AdoRepoSyncState[]
+
+  @@unique([azureDevOpsInstanceId, adoProject])
+  @@map("azure_devops_project_syncs")
+}
+
+// Per-repo intelligence watermark for an ADO project sync. A project (e.g. Horus)
+// can fan out to 50+ repos with tens of thousands of PRs; a single project-level
+// `lastSyncedAt` made the sync all-or-nothing, so one transient fetch failure
+// aborted the whole project and the watermark never advanced — it re-fetched from
+// scratch every run and never completed. This row lets each repo advance its own
+// PR/commit watermark independently, so progress is monotonic and a failing repo
+// is retried in isolation next run. Mirrors GitHubRepoSync's per-repo lastSyncedAt.
+model AdoRepoSyncState {
+  id                       String @id @default(uuid())
+  azureDevOpsProjectSyncId String @map("azure_devops_project_sync_id")
+  repoId                   String @map("repo_id")
+  repoName                 String @map("repo_name")
+
+  lastPrSyncAt     DateTime? @map("last_pr_sync_at")
+  lastCommitSyncAt DateTime? @map("last_commit_sync_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  projectSync AzureDevOpsProjectSync @relation(fields: [azureDevOpsProjectSyncId], references: [id], onDelete: Cascade)
+
+  @@unique([azureDevOpsProjectSyncId, repoId])
+  @@index([azureDevOpsProjectSyncId])
+  @@map("ado_repo_sync_states")
+}
+
+model BoardAdoSource {
+  id                       String  @id @default(uuid())
+  boardId                  String  @map("board_id")
+  azureDevOpsProjectSyncId String  @map("azure_devops_project_sync_id")
+  targetGroupId            String? @map("target_group_id")
+
+  syncWorkItemsToBoard Boolean  @default(true) @map("sync_work_items_to_board")
+  useForIntelligence   Boolean  @default(true) @map("use_for_intelligence")
+  allowedWorkItemTypes String[] @default([]) @map("allowed_work_item_types")
+  wiqlFilter           String?  @map("wiql_filter")
+  fieldMappings        Json     @default("{}") @map("field_mappings")
+  statusMapping        Json     @default("{}") @map("status_mapping")
+  defaultSyncedFields  String[] @default(["name", "status", "owner"]) @map("default_synced_fields")
+
+  lastPromotedAt DateTime? @map("last_promoted_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  board                  Board                  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  azureDevOpsProjectSync AzureDevOpsProjectSync @relation(fields: [azureDevOpsProjectSyncId], references: [id], onDelete: Cascade)
+  targetGroup            Group?                 @relation(fields: [targetGroupId], references: [id], onDelete: SetNull)
+
+  @@unique([boardId, azureDevOpsProjectSyncId])
+  @@index([boardId])
+  @@map("board_ado_sources")
+}
+
+// ── GitLab ────────────────────────────────────────────────────────────────────
+
+model GitLabProjectSync {
+  id               String @id @default(uuid())
+  gitlabInstanceId String @map("gitlab_instance_id")
+  projectPath      String @map("project_path")
+
+  syncPrs     Boolean @default(true) @map("sync_prs")
+  syncCommits Boolean @default(false) @map("sync_commits")
+
+  lastSyncedAt DateTime? @map("last_synced_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  gitlabInstance GitLabInstance      @relation(fields: [gitlabInstanceId], references: [id], onDelete: Cascade)
+  boardSources   BoardGitLabSource[]
+
+  @@unique([gitlabInstanceId, projectPath])
+  @@map("gitlab_project_syncs")
+}
+
+model BoardGitLabSource {
+  id                  String  @id @default(uuid())
+  boardId             String  @map("board_id")
+  gitlabProjectSyncId String  @map("gitlab_project_sync_id")
+  targetGroupId       String? @map("target_group_id")
+
+  syncIssuesToBoard Boolean @default(false) @map("sync_issues_to_board")
+  syncMrsToBoard    Boolean @default(false) @map("sync_mrs_to_board")
+
+  lastPromotedAt DateTime? @map("last_promoted_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  board             Board             @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  gitlabProjectSync GitLabProjectSync @relation(fields: [gitlabProjectSyncId], references: [id], onDelete: Cascade)
+  targetGroup       Group?            @relation(fields: [targetGroupId], references: [id], onDelete: SetNull)
+
+  @@unique([boardId, gitlabProjectSyncId])
+  @@index([boardId])
+  @@map("board_gitlab_sources")
+}
+
+// ── Boards Sidebar ────────────────────────────────────────────────────────────
+
+model BoardFolder {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  parentId   String?  @map("parent_id")
+  name       String
+  color      String   @default("#6366F1")
+  position   Float
+  isExpanded Boolean  @default(true) @map("is_expanded")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  parent       BoardFolder?    @relation("FolderTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children     BoardFolder[]   @relation("FolderTree")
+  user         User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  prefs        UserBoardPref[]
+  roadmapPrefs UserRoadmapPref[]
+
+  @@index([userId, parentId, position])
+  @@map("board_folders")
+}
+
+model UserBoardPref {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  boardId    String   @map("board_id")
+  folderId   String?  @map("folder_id")
+  position   Float    @default(0)
+  isFavorite Boolean  @default(false) @map("is_favorite")
+  isHidden   Boolean  @default(false) @map("is_hidden")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  user   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  board  Board        @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  folder BoardFolder? @relation(fields: [folderId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, boardId])
+  @@index([userId, folderId, position])
+  @@map("user_board_prefs")
+}
+
+model OrgTree {
+  id           String    @id @default(uuid())
+  name         String
+  position     Int       @default(0)
+  lastSyncedAt DateTime? @map("last_synced_at")
+  lastSyncSummary Json?   @map("last_sync_summary")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  employees        OrgEmployee[]
+  employeeBoards   EmployeeBoard[]
+  timesheetConfig  OrgTreeTimesheetConfig?
+  source           OrgTreeSource?
+  @@map("org_trees")
+}
+
+model OrgEmployee {
+  id                 String    @id @default(uuid())
+  orgTreeId          String    @map("org_tree_id")
+  externalId         String?   @map("external_id")
+  name               String
+  role               String?
+  email              String?
+  managerExternalId  String?   @map("manager_external_id")
+  managerId          String?   @map("manager_id")
+  position           Int       @default(0)
+  isVacancy          Boolean   @default(false) @map("is_vacancy")
+  matched            Boolean   @default(false)
+  isActive           Boolean   @default(false) @map("is_active")
+  lastContributionAt DateTime? @map("last_contribution_at")
+  hasAssignment      Boolean   @default(false) @map("has_assignment")
+  employeeDisplayId  String?   @map("employee_display_id")
+  businessTitle      String?   @map("business_title")
+  hireDate           DateTime? @map("hire_date")
+  location           String?
+  employeeType       String?   @map("employee_type")
+  timeType           String?   @map("time_type")
+  phone              String?
+  workAddress        String?   @map("work_address")
+  salaryCurrent      Int?      @map("salary_current")
+  salaryCurrency     String?   @map("salary_currency")
+  statsJson          Json?     @map("stats_json")
+  syncedAt           DateTime? @map("synced_at")
+  msGraphId          String?   @map("ms_graph_id")
+  departedAt         DateTime? @map("departed_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+  orgTree      OrgTree       @relation(fields: [orgTreeId], references: [id], onDelete: Cascade)
+  manager      OrgEmployee?  @relation("Reports", fields: [managerId], references: [id], onDelete: SetNull)
+  reports      OrgEmployee[] @relation("Reports")
+  aliases      OrgEmployeeAlias[]
+  boardScopes         EmployeeBoard[]       @relation("BoardScope")
+  boardMembers        EmployeeBoardMember[]
+  employeeFieldValues EmployeeFieldValue[]
+  comments     OrgEmployeeComment[]
+  uploads      Upload[]
+  @@unique([orgTreeId, externalId])
+  @@unique([orgTreeId, msGraphId])
+  @@index([orgTreeId])
+  @@index([managerId])
+  @@map("org_employees")
+}
+
+model OrgTreeSource {
+  id              String    @id @default(uuid())
+  orgTreeId       String    @unique @map("org_tree_id")
+  provider        String    @default("microsoft")
+  rootUpn         String    @map("root_upn")
+  rootGraphId     String?   @map("root_graph_id")
+  status          String    @default("idle")
+  lastSyncedAt    DateTime? @map("last_synced_at")
+  lastSyncSummary Json?     @map("last_sync_summary")
+  // Microsoft Graph connection tokens (plaintext, matching the repo's existing
+  // Jira/GitHub/ADO/GitLab token convention; localhost-only). msAccessToken is a
+  // user-pasted Graph token (no app registration — the primary path); msRefreshToken
+  // is a delegated offline token (device-code path). The worker prefers msAccessToken.
+  msAccessToken    String?   @map("ms_access_token")
+  msRefreshToken   String?   @map("ms_refresh_token")
+  microsoftUpn     String?   @map("microsoft_upn")
+  connectedByEmail String?   @map("connected_by_email")
+  connectedAt      DateTime? @map("connected_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  orgTree         OrgTree   @relation(fields: [orgTreeId], references: [id], onDelete: Cascade)
+  @@map("org_tree_sources")
+}
+
+model BoardCalendarSource {
+  id           String    @id @default(uuid())
+  boardId      String    @unique @map("board_id")
+  provider     String    @default("microsoft")
+  // Whose calendar to read interviews from (email / UPN).
+  calendarUpn  String    @default("") @map("calendar_upn")
+  // Microsoft Graph connection tokens (plaintext, matching the repo's existing
+  // Jira/GitHub/ADO/GitLab/OrgTreeSource token convention; localhost-only).
+  // msAccessToken is a user-pasted Graph token (no app registration — the primary
+  // path); msRefreshToken is a delegated offline token (device-code path).
+  msAccessToken    String?   @map("ms_access_token")
+  msRefreshToken   String?   @map("ms_refresh_token")
+  microsoftUpn     String?   @map("microsoft_upn")
+  status           String    @default("idle")
+  lastSyncedAt     DateTime? @map("last_synced_at")
+  lastSyncSummary  Json?     @map("last_sync_summary")
+  connectedByEmail String?   @map("connected_by_email")
+  connectedAt      DateTime? @map("connected_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  board            Board     @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  @@map("board_calendar_sources")
+}
+
+model OrgEmployeeAlias {
+  id         String @id @default(uuid())
+  employeeId String @map("employee_id")
+  provider   String
+  kind       String
+  value      String
+  createdAt  DateTime @default(now()) @map("created_at")
+  employee   OrgEmployee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  @@unique([employeeId, provider, kind, value])
+  @@index([employeeId])
+  @@map("org_employee_aliases")
+}
+
+model OrgEmployeeComment {
+  id            String      @id @default(uuid())
+  orgEmployeeId String      @map("org_employee_id")
+  employee      OrgEmployee @relation(fields: [orgEmployeeId], references: [id], onDelete: Cascade)
+  content       Json
+  authorName    String      @default("VP") @map("author_name")
+  authorAvatar  String?     @map("author_avatar")
+  pinned        Boolean     @default(false)
+  authorId      String?     @map("author_id")
+  author        User?       @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt @map("updated_at")
+  uploads       Upload[]
+  @@index([orgEmployeeId, pinned, createdAt])
+  @@index([authorId])
+  @@map("org_employee_comments")
+}
+
+model EmployeeBoard {
+  id              String   @id @default(uuid())
+  orgTreeId       String   @map("org_tree_id")
+  name            String
+  scopeEmployeeId String?  @map("scope_employee_id")
+  columnConfig    Json?    @map("column_config")
+  position        Int      @default(0)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  orgTree OrgTree              @relation(fields: [orgTreeId], references: [id], onDelete: Cascade)
+  scope   OrgEmployee?         @relation("BoardScope", fields: [scopeEmployeeId], references: [id], onDelete: SetNull)
+  groups  EmployeeGroup[]
+  members EmployeeBoardMember[]
+  columns EmployeeColumn[]
+
+  @@index([orgTreeId])
+  @@map("employee_boards")
+}
+
+model EmployeeGroup {
+  id              String   @id @default(uuid())
+  employeeBoardId String   @map("employee_board_id")
+  name            String
+  color           String   @default("#6366F1")
+  position        Int      @default(0)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  board   EmployeeBoard         @relation(fields: [employeeBoardId], references: [id], onDelete: Cascade)
+  members EmployeeBoardMember[]
+
+  @@index([employeeBoardId])
+  @@map("employee_groups")
+}
+
+model EmployeeBoardMember {
+  id              String   @id @default(uuid())
+  employeeBoardId String   @map("employee_board_id")
+  orgEmployeeId   String   @map("org_employee_id")
+  employeeGroupId String   @map("employee_group_id")
+  position        Int      @default(0)
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  board    EmployeeBoard @relation(fields: [employeeBoardId], references: [id], onDelete: Cascade)
+  employee OrgEmployee   @relation(fields: [orgEmployeeId], references: [id], onDelete: Cascade)
+  group    EmployeeGroup @relation(fields: [employeeGroupId], references: [id], onDelete: Cascade)
+
+  @@unique([employeeBoardId, orgEmployeeId])
+  @@index([employeeGroupId, position])
+  @@map("employee_board_members")
+}
+
+model EmployeeColumn {
+  id              String   @id @default(uuid())
+  employeeBoardId String   @map("employee_board_id")
+  name            String
+  type            String
+  config          Json?
+  position        Int      @default(0)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  board       EmployeeBoard        @relation(fields: [employeeBoardId], references: [id], onDelete: Cascade)
+  fieldValues EmployeeFieldValue[]
+
+  @@index([employeeBoardId])
+  @@map("employee_columns")
+}
+
+model EmployeeFieldValue {
+  id               String   @id @default(uuid())
+  employeeColumnId String   @map("employee_column_id")
+  orgEmployeeId    String   @map("org_employee_id")
+  value            String
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  column   EmployeeColumn @relation(fields: [employeeColumnId], references: [id], onDelete: Cascade)
+  employee OrgEmployee    @relation(fields: [orgEmployeeId], references: [id], onDelete: Cascade)
+
+  @@unique([employeeColumnId, orgEmployeeId])
+  @@index([orgEmployeeId])
+  @@map("employee_field_values")
+}
+
+// ── Cross-board Roadmap ───────────────────────────────────────────────────────
+
+enum RoadmapAccessRole {
+  OWNER  @map("owner")
+  EDITOR @map("editor")
+  VIEWER @map("viewer")
+
+  @@map("roadmap_access_role")
+}
+
+enum RoadmapGroupSource {
+  MANUAL    @map("manual")
+  BOARD_SUB @map("board_sub")
+
+  @@map("roadmap_group_source")
+}
+
+enum RoadmapViewType {
+  GRID  @map("grid")
+  GANTT @map("gantt")
+
+  @@map("roadmap_view_type")
+}
+
+model Roadmap {
+  id                  String   @id @default(uuid())
+  name                String
+  description         String?
+  createdBy           String   @map("created_by")
+  hiddenSystemColumns Json     @default("[]") @map("hidden_system_columns")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  accessEntries RoadmapAccess[]
+  subscriptions RoadmapBoardSubscription[]
+  groupRefs     RoadmapGroup[]
+  views         RoadmapView[]
+  prefs         UserRoadmapPref[]
+
+  @@map("roadmaps")
+}
+
+model RoadmapAccess {
+  id        String            @id @default(uuid())
+  roadmapId String            @map("roadmap_id")
+  userId    String            @map("user_id")
+  role      RoadmapAccessRole
+  createdAt DateTime          @default(now()) @map("created_at")
+  updatedAt DateTime          @updatedAt @map("updated_at")
+
+  roadmap Roadmap @relation(fields: [roadmapId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roadmapId, userId])
+  @@index([roadmapId])
+  @@index([userId])
+  @@map("roadmap_access")
+}
+
+model RoadmapBoardSubscription {
+  id        String   @id @default(uuid())
+  roadmapId String   @map("roadmap_id")
+  boardId   String   @map("board_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  roadmap Roadmap @relation(fields: [roadmapId], references: [id], onDelete: Cascade)
+  board   Board   @relation(fields: [boardId], references: [id], onDelete: Cascade)
+
+  @@unique([roadmapId, boardId])
+  @@index([roadmapId])
+  @@map("roadmap_board_subscriptions")
+}
+
+model RoadmapGroup {
+  id        String             @id @default(uuid())
+  roadmapId String             @map("roadmap_id")
+  groupId   String             @map("group_id")
+  position  Float
+  source    RoadmapGroupSource @default(MANUAL)
+  createdAt DateTime           @default(now()) @map("created_at")
+
+  roadmap Roadmap @relation(fields: [roadmapId], references: [id], onDelete: Cascade)
+  group   Group   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([roadmapId, groupId])
+  @@index([roadmapId, position])
+  @@map("roadmap_groups")
+}
+
+model RoadmapView {
+  id        String          @id @default(uuid())
+  roadmapId String          @map("roadmap_id")
+  type      RoadmapViewType
+  name      String          @db.VarChar(100)
+  position  Int             @default(0)
+  createdAt DateTime        @default(now()) @map("created_at")
+  updatedAt DateTime        @updatedAt @map("updated_at")
+
+  roadmap     Roadmap             @relation(fields: [roadmapId], references: [id], onDelete: Cascade)
+  ganttConfig RoadmapGanttConfig?
+
+  @@index([roadmapId])
+  @@map("roadmap_views")
+}
+
+model RoadmapGanttConfig {
+  id               String      @id @default(uuid())
+  roadmapViewId    String      @unique @map("roadmap_view_id")
+  roadmapView      RoadmapView @relation(fields: [roadmapViewId], references: [id], onDelete: Cascade)
+  startDate        DateTime    @map("start_date")
+  visibleQuarters  Int         @default(4) @map("visible_quarters")
+  sizeDurations    Json        @map("size_durations")
+  defaultSizeWeeks Float       @default(2) @map("default_size_weeks")
+  hiddenGroupIds   Json        @default("[]") @map("hidden_group_ids")
+  createdAt        DateTime    @default(now()) @map("created_at")
+  updatedAt        DateTime    @updatedAt @map("updated_at")
+
+  @@map("roadmap_gantt_configs")
+}
+
+model UserRoadmapPref {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  roadmapId  String   @map("roadmap_id")
+  folderId   String?  @map("folder_id")
+  position   Float    @default(0)
+  isFavorite Boolean  @default(false) @map("is_favorite")
+  isHidden   Boolean  @default(false) @map("is_hidden")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roadmap Roadmap      @relation(fields: [roadmapId], references: [id], onDelete: Cascade)
+  folder  BoardFolder? @relation(fields: [folderId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, roadmapId])
+  @@index([userId, folderId, position])
+  @@map("user_roadmap_prefs")
+}
+
+// ── Timesheet ─────────────────────────────────────────────────────────────────
+
+model TimesheetStatusRule {
+  id                 String             @id @default(uuid())
+  scope              TimesheetRuleScope
+  role               String?
+  employeeId         String?            @map("employee_id")
+  inProgressStatuses String[]           @default([]) @map("in_progress_statuses")
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+
+  @@unique([scope, role, employeeId])
+  @@map("timesheet_status_rules")
+}
+
+model OrgTreeTimesheetConfig {
+  orgTreeId      String   @id @map("org_tree_id")
+  activeStatuses String[] @default([]) @map("active_statuses")
+  // Per-day working-hours cap. null = use the engine default (8h); 0 = uncapped.
+  dailyCapHours  Float?   @map("daily_cap_hours")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  orgTree        OrgTree  @relation(fields: [orgTreeId], references: [id], onDelete: Cascade)
+
+  @@map("org_tree_timesheet_configs")
+}

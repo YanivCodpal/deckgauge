@@ -1,0 +1,360 @@
+'use client';
+import { useState } from 'react';
+import type { BulkBindRequest } from '@deckgauge/shared';
+import { BoardSourceCard, type SourceShape, type AdoConnectionPatch } from './BoardSourceCard';
+import { BoardAddSource, type ReadyProviders, type CartItem, type AttachResult } from './BoardAddSource';
+import type { GitHubInstanceOption, BulkAttachResult } from './GitHubSourcePicker';
+import { hydrateJira, hydrateGitHub, hydrateAdo, hydrateGitLab } from './hydrate';
+import type { BoardStatusOption } from './StatusMappingEditor';
+import {
+  patchBoardJiraSource,
+  patchBoardGitHubSource,
+  patchBoardAdoSource,
+  patchBoardGitLabSource,
+  detachBoardJiraSource,
+  detachBoardGitHubSource,
+  detachBoardAdoSource,
+  detachBoardGitLabSource,
+  attachBoardJiraSource,
+  attachBoardGitHubSource,
+  attachBoardAdoSource,
+  attachBoardGitLabSource,
+  ensureJiraProjectSync,
+  ensureGitHubRepoSync,
+  ensureAdoProjectSync,
+  ensureGitLabProjectSync,
+  listBoardGitHubSources,
+} from '../../actions/board-sources';
+import { updateAdoProjectSync } from '../../actions/connections';
+import { bulkAddGitHubRepos } from '../../actions/github-sources';
+import { fetchJiraInstances, discoverJiraProjects, createJiraInstance, testJiraConnection } from '../../actions/jira';
+import { fetchGitHubInstances, discoverGitHubRepos, createGitHubInstance, testGitHubConnection, updateGitHubInstance } from '../../actions/github';
+import { fetchAzureDevOpsInstances, listAzureDevOpsRemoteProjects, createAzureDevOpsInstance, testAzureDevOpsConnection } from '../../actions/azure-devops';
+import { fetchGitLabInstances, listGitLabRemoteProjects, createGitLabInstanceReturning, testGitLabConnection } from '../../actions/gitlab';
+import type { AddNewActions, Provider } from './BoardAddSource';
+
+interface Props {
+  boardId: string;
+  initialSources: SourceShape[];
+  groups: Array<{ id: string; name: string }>;
+  readyProviders: ReadyProviders;
+  boardStatuses: BoardStatusOption[];
+  /** GitHub connections available to this board; enables the live repo picker. */
+  githubInstances?: GitHubInstanceOption[];
+}
+
+export function BoardSourcesList({
+  boardId,
+  initialSources,
+  groups,
+  readyProviders,
+  boardStatuses,
+  githubInstances = [],
+}: Props) {
+  const [sources, setSources] = useState<SourceShape[]>(initialSources);
+  const [addOpen, setAddOpen] = useState(false);
+
+  const catalogEmpty =
+    readyProviders.jira.length === 0 &&
+    readyProviders.github.length === 0 &&
+    readyProviders.ado.length === 0 &&
+    readyProviders.gitlab.length === 0;
+
+  async function handleSave(
+    source: SourceShape,
+    patch: Record<string, unknown>,
+    connectionPatch?: AdoConnectionPatch,
+  ) {
+    let updated: SourceShape | null = null;
+    if (source.provider === 'jira') {
+      const row = await patchBoardJiraSource(boardId, source.id, patch as never);
+      updated = hydrateJira({ ...row, jiraProjectSync: { jiraProjectKey: source.name } });
+    } else if (source.provider === 'github') {
+      const row = await patchBoardGitHubSource(boardId, source.id, patch as never);
+      updated = hydrateGitHub({
+        ...row,
+        gitHubRepoSync: {
+          repoFullName: source.name,
+          syncPrs: source.connection.syncPrs,
+          syncCommits: source.connection.syncCommits,
+        },
+      });
+    } else if (source.provider === 'ado') {
+      // Code-sync scope lives on the shared project sync — persist it separately.
+      if (connectionPatch && source.azureDevOpsProjectSyncId) {
+        await updateAdoProjectSync(source.azureDevOpsProjectSyncId, connectionPatch);
+      }
+      const conn = connectionPatch ?? {
+        syncPrs: source.connection.syncPrs,
+        syncCommits: source.connection.syncCommits,
+        syncRepos: source.connection.syncRepos ?? [],
+        syncAllRepos: source.connection.syncAllRepos ?? false,
+      };
+      const row = await patchBoardAdoSource(boardId, source.id, patch as never);
+      updated = hydrateAdo({
+        ...row,
+        azureDevOpsProjectSyncId: source.azureDevOpsProjectSyncId,
+        azureDevOpsProjectSync: {
+          id: source.azureDevOpsProjectSyncId,
+          adoProject: source.name,
+          syncPrs: conn.syncPrs,
+          syncCommits: conn.syncCommits,
+          syncRepos: conn.syncRepos,
+          syncAllRepos: conn.syncAllRepos,
+        },
+      });
+    } else if (source.provider === 'gitlab') {
+      const row = await patchBoardGitLabSource(boardId, source.id, patch as never);
+      updated = hydrateGitLab({ ...row, gitlabProjectSync: { projectPath: source.name } });
+    }
+    if (updated) {
+      const finalUpdated = updated;
+      setSources((prev) => prev.map((s) => (s.id === finalUpdated.id ? finalUpdated : s)));
+    }
+  }
+
+  async function handleDetach(source: SourceShape) {
+    if (source.provider === 'jira') await detachBoardJiraSource(boardId, source.id);
+    if (source.provider === 'github') await detachBoardGitHubSource(boardId, source.id);
+    if (source.provider === 'ado') await detachBoardAdoSource(boardId, source.id);
+    if (source.provider === 'gitlab') await detachBoardGitLabSource(boardId, source.id);
+    setSources((prev) => prev.filter((s) => s.id !== source.id));
+  }
+
+  const appendRow = (row: SourceShape) => setSources((prev) => [...prev, row]);
+
+  async function handleAttachMany(items: CartItem[]): Promise<AttachResult[]> {
+    const results: AttachResult[] = [];
+    for (const item of items) {
+      try {
+        if (item.provider === 'jira') {
+          const outcome = await attachBoardJiraSource({ boardId, jiraProjectSyncId: item.syncId });
+          if (!outcome.ok) {
+            results.push({ item, ok: false, error: outcome.error });
+            continue;
+          }
+          appendRow(hydrateJira(outcome.row as unknown as Record<string, unknown>));
+        } else if (item.provider === 'github') {
+          const outcome = await attachBoardGitHubSource({
+            boardId,
+            gitHubRepoSyncId: item.syncId,
+            syncIssuesToBoard: item.roles.syncIssuesToBoard,
+            useForIntelligence: item.roles.useForIntelligence,
+          });
+          if (!outcome.ok) {
+            results.push({ item, ok: false, error: outcome.error });
+            continue;
+          }
+          appendRow(hydrateGitHub(outcome.row as unknown as Record<string, unknown>));
+        } else if (item.provider === 'ado') {
+          const outcome = await attachBoardAdoSource({
+            boardId,
+            azureDevOpsProjectSyncId: item.syncId,
+            syncWorkItemsToBoard: item.roles.syncWorkItemsToBoard,
+            useForIntelligence: item.roles.useForIntelligence,
+          });
+          if (!outcome.ok) {
+            results.push({ item, ok: false, error: outcome.error });
+            continue;
+          }
+          appendRow(hydrateAdo(outcome.row as unknown as Record<string, unknown>));
+        } else if (item.provider === 'gitlab') {
+          const outcome = await attachBoardGitLabSource({
+            boardId,
+            gitlabProjectSyncId: item.syncId,
+            syncIssuesToBoard: item.roles.syncIssuesToBoard,
+            syncMrsToBoard: item.roles.syncMrsToBoard,
+          });
+          if (!outcome.ok) {
+            results.push({ item, ok: false, error: outcome.error });
+            continue;
+          }
+          appendRow(hydrateGitLab(outcome.row as unknown as Record<string, unknown>));
+        }
+        results.push({ item, ok: true });
+      } catch (e) {
+        results.push({ item, ok: false, error: e instanceof Error ? e.message : 'attach failed' });
+      }
+    }
+    return results;
+  }
+
+  // GitHub bulk-bind: provisions repos (tiering + backfill) and links them to
+  // the board. The response carries only counts, so re-fetch the board's GitHub
+  // sources and swap them into local state to surface the new rows immediately.
+  async function handleBulkAttachGitHub(req: BulkBindRequest): Promise<BulkAttachResult> {
+    try {
+      const summary = await bulkAddGitHubRepos(boardId, req);
+      const ghRows = await listBoardGitHubSources(boardId);
+      const ghSources = ghRows.map((row) =>
+        hydrateGitHub(row as unknown as Record<string, unknown>),
+      );
+      setSources((prev) => [...prev.filter((s) => s.provider !== 'github'), ...ghSources]);
+      return {
+        ok: true,
+        message: `Added ${summary.addedCount}, re-enabled ${summary.reEnabledCount}, skipped ${summary.skippedCount}.`,
+      };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : 'Bulk add failed.' };
+    }
+  }
+
+  // Replace an expired GitHub connection token from inside the picker, then
+  // verify it against GitHub so the user gets immediate confirmation.
+  async function handleReplaceGitHubToken(
+    instanceId: string,
+    token: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    try {
+      await updateGitHubInstance(instanceId, { accessToken: token });
+      const test = await testGitHubConnection(instanceId);
+      return test.ok ? { ok: true } : { ok: false, error: test.error ?? 'Token test failed.' };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : 'Could not update the token.' };
+    }
+  }
+
+  // Repos/projects already attached to this board, keyed `${provider}:${name}`.
+  // Passed to the picker so already-attached sources are hidden (matched by the
+  // human-readable name, since the remote picker lists names, not sync ids).
+  const attachedKeys = new Set(sources.map((s) => `${s.provider}:${s.name}`));
+
+  const addNewActions: AddNewActions = {
+    listConnections: async (provider: Provider) => {
+      if (provider === 'jira') {
+        const rows = (await fetchJiraInstances()) as Array<{ id: string; name?: string }>;
+        return rows.map((r) => ({ id: r.id, name: r.name ?? r.id }));
+      }
+      if (provider === 'github') {
+        const rows = (await fetchGitHubInstances()) as Array<{ id: string; baseUrl?: string }>;
+        return rows.map((r) => ({ id: r.id, name: r.baseUrl ?? r.id }));
+      }
+      if (provider === 'ado') {
+        const rows = (await fetchAzureDevOpsInstances()) as Array<{ id: string; name?: string }>;
+        return rows.map((r) => ({ id: r.id, name: r.name ?? r.id }));
+      }
+      const rows = (await fetchGitLabInstances()) as Array<{ id: string; name?: string }>;
+      return rows.map((r) => ({ id: r.id, name: r.name ?? r.id }));
+    },
+    listRemoteProjects: async (provider: Provider, connectionId: string) => {
+      if (provider === 'jira') {
+        const projects = (await discoverJiraProjects(connectionId)) as Array<
+          { key?: string; projectKey?: string } | string
+        >;
+        return projects
+          .map((p) => (typeof p === 'string' ? p : p.key ?? p.projectKey ?? ''))
+          .filter((s): s is string => s.length > 0);
+      }
+      if (provider === 'github') return discoverGitHubRepos(connectionId);
+      if (provider === 'ado') return listAzureDevOpsRemoteProjects(connectionId);
+      return listGitLabRemoteProjects(connectionId);
+    },
+    createConnection: async (provider: Provider, v: Record<string, string>) => {
+      if (provider === 'jira') {
+        const inst = (await createJiraInstance({ name: v.name, atlassianUrl: v.atlassianUrl, email: v.email, apiToken: v.apiToken, projectKeys: [] })) as { id: string; name?: string };
+        return { id: inst.id, name: inst.name ?? v.name };
+      }
+      if (provider === 'github') {
+        const inst = (await createGitHubInstance({ baseUrl: v.baseUrl, accessToken: v.accessToken, repos: [] })) as { id: string; baseUrl?: string };
+        return { id: inst.id, name: inst.baseUrl ?? 'GitHub' };
+      }
+      if (provider === 'ado') {
+        const inst = (await createAzureDevOpsInstance({ name: v.name, orgUrl: v.orgUrl, authMethod: (v.authMethod as 'PAT' | 'BASIC') ?? 'PAT', accessToken: v.accessToken, username: v.username ?? null, projects: [] })) as { id: string; name?: string };
+        return { id: inst.id, name: inst.name ?? v.name };
+      }
+      const inst = await createGitLabInstanceReturning({ name: v.name, baseUrl: v.baseUrl, accessToken: v.accessToken, projects: [] });
+      return { id: inst.id, name: v.name };
+    },
+    testConnection: async (provider: Provider, connectionId: string) => {
+      if (provider === 'jira') {
+        const r = await testJiraConnection(connectionId);
+        return r ? { ok: true as const } : { ok: false as const, error: 'test failed' };
+      }
+      if (provider === 'github') return testGitHubConnection(connectionId);
+      if (provider === 'ado') return testAzureDevOpsConnection(connectionId);
+      return testGitLabConnection(connectionId);
+    },
+    ensureSync: async (provider: Provider, connectionId: string, projectKey: string) => {
+      if (provider === 'jira') {
+        const { id } = await ensureJiraProjectSync(connectionId, projectKey);
+        return { syncId: id, label: projectKey };
+      }
+      if (provider === 'github') {
+        const { id } = await ensureGitHubRepoSync(connectionId, projectKey);
+        return { syncId: id, label: projectKey };
+      }
+      if (provider === 'ado') {
+        const { id } = await ensureAdoProjectSync(connectionId, projectKey);
+        return { syncId: id, label: projectKey };
+      }
+      const { id } = await ensureGitLabProjectSync(connectionId, projectKey);
+      return { syncId: id, label: projectKey };
+    },
+  };
+
+  return (
+    <main className="space-y-3 px-6 py-6">
+      <header className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold text-slate-900">Sources</h1>
+          <p className="text-sm text-slate-500 mt-0.5">
+            {sources.length} {sources.length === 1 ? 'source' : 'sources'} attached to this board
+          </p>
+        </div>
+        <button
+          type="button"
+          className="px-3 py-1.5 rounded-md bg-indigo-600 text-white text-sm font-medium"
+          onClick={() => setAddOpen(true)}
+        >
+          + Add source
+        </button>
+      </header>
+
+      {addOpen && (
+        <BoardAddSource
+          boardId={boardId}
+          readyProviders={readyProviders}
+          attachedKeys={attachedKeys}
+          onCancel={() => setAddOpen(false)}
+          onAttachMany={handleAttachMany}
+          addNewActions={addNewActions}
+          githubInstances={githubInstances}
+          onBulkAttachGitHub={handleBulkAttachGitHub}
+          onReplaceGitHubToken={handleReplaceGitHubToken}
+        />
+      )}
+
+      {sources.length === 0 && !addOpen ? (
+        <div className="rounded-lg border border-dashed border-slate-200 p-8 text-center text-sm text-slate-500">
+          No sources attached.{' '}
+          <button onClick={() => setAddOpen(true)} className="text-indigo-600 hover:underline">
+            Add your first source
+          </button>
+          .
+          {catalogEmpty && (
+            <div className="mt-2 text-xs text-slate-400">
+              Catalog is empty.{' '}
+              <a href="/sources" className="text-indigo-600 hover:underline">
+                Set up a new source in Sources &rarr;
+              </a>
+            </div>
+          )}
+        </div>
+      ) : (
+        sources.map((s) => (
+          <BoardSourceCard
+            key={s.id}
+            boardId={boardId}
+            source={s}
+            groups={groups}
+            boardStatuses={boardStatuses}
+            onSave={(patch, connectionPatch) => handleSave(s, patch, connectionPatch)}
+            onSaveStatusMapping={(m) => handleSave(s, { statusMapping: m })}
+            onSaveAllowedIssueTypes={(types) => handleSave(s, { allowedIssueTypes: types })}
+            onDetach={() => handleDetach(s)}
+          />
+        ))
+      )}
+    </main>
+  );
+}

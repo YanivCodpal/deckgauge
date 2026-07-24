@@ -1,0 +1,113 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Theme tokens. Neutral scales are exposed as space-separated RGB channels so
+ * Tailwind's `rgb(var(--x) / <alpha-value>)` colors work (incl. /opacity).
+ * Dark mode REVERSES each neutral scale (slate-50 becomes the darkest, slate-900
+ * the lightest) — because the app expresses hierarchy with the scale itself
+ * (light bg = 50/100, dark text = 800/900), reversing it flips every surface and
+ * text token consistently with zero component edits. Accents stay fixed.
+ */
+:root {
+  --slate-50: 248 250 252;  --slate-100: 241 245 249; --slate-200: 226 232 240;
+  --slate-300: 203 213 225; --slate-400: 148 163 184; --slate-500: 100 116 139;
+  --slate-600: 71 85 105;   --slate-700: 51 65 85;    --slate-800: 30 41 59;
+  --slate-900: 15 23 42;    --slate-950: 2 6 23;
+
+  --gray-50: 249 250 251;  --gray-100: 243 244 246; --gray-200: 229 231 235;
+  --gray-300: 209 213 219; --gray-400: 156 163 175; --gray-500: 107 114 128;
+  --gray-600: 75 85 99;    --gray-700: 55 65 81;    --gray-800: 31 41 55;
+  --gray-900: 17 24 39;    --gray-950: 3 7 18;
+
+  --surface-0: 248 250 252; /* app background */
+  --surface-1: 255 255 255; /* cards / panels */
+  --surface-2: 241 245 249; /* insets / subtle fills */
+}
+
+.dark {
+  --slate-50: 15 23 42;    --slate-100: 30 41 59;    --slate-200: 51 65 85;
+  --slate-300: 71 85 105;  --slate-400: 100 116 139; --slate-500: 148 163 184;
+  --slate-600: 203 213 225;--slate-700: 226 232 240; --slate-800: 241 245 249;
+  --slate-900: 248 250 252;--slate-950: 248 250 252;
+
+  --gray-50: 17 24 39;     --gray-100: 31 41 55;     --gray-200: 55 65 81;
+  --gray-300: 75 85 99;    --gray-400: 107 114 128;  --gray-500: 156 163 175;
+  --gray-600: 209 213 219; --gray-700: 229 231 235;  --gray-800: 243 244 246;
+  --gray-900: 249 250 251; --gray-950: 249 250 251;
+
+  --surface-0: 15 23 42;   /* app background */
+  --surface-1: 30 41 59;   /* cards / panels lift above the background */
+  --surface-2: 51 65 85;   /* insets / subtle fills */
+}
+
+@layer base {
+  body {
+    @apply bg-surface-0 text-slate-800 antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  ::selection {
+    @apply bg-teal-500/20 text-teal-900;
+  }
+
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { @apply bg-transparent; }
+  ::-webkit-scrollbar-thumb { @apply bg-slate-300 rounded-full; }
+  ::-webkit-scrollbar-thumb:hover { @apply bg-slate-400; }
+
+  /* Literal `bg-white` is used app-wide for card/panel surfaces; in dark mode it
+   * must become the elevated surface, not stay white. `text-white`/`border-white`
+   * are intentionally left fixed (they sit on coloured accents). */
+  .dark .bg-white { background-color: rgb(var(--surface-1)); }
+}
+
+@layer components {
+  .glass { @apply bg-surface-1 rounded-xl shadow-card; }
+  .glass-elevated { @apply bg-surface-1 rounded-xl shadow-dropdown border border-slate-200; }
+
+  .input-dark {
+    @apply w-full rounded-lg bg-surface-1 border border-slate-200 px-3 py-2 text-sm text-slate-800
+      placeholder-slate-400 transition-all duration-200
+      focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/20
+      hover:border-slate-300;
+  }
+
+  .select-dark {
+    @apply w-full rounded-lg bg-surface-1 border border-slate-200 px-3 py-2 text-sm text-slate-800
+      transition-all duration-200
+      focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/20
+      hover:border-slate-300;
+  }
+
+  .btn-primary {
+    @apply rounded-lg bg-teal-600 px-4 py-2 text-sm font-medium text-white
+      shadow-sm transition-all duration-200
+      hover:bg-teal-700 active:scale-[0.98]
+      disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply rounded-lg bg-surface-1 border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600
+      transition-all duration-200
+      hover:bg-slate-50 hover:border-slate-300 hover:text-slate-700
+      active:scale-[0.98]
+      disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-ghost {
+    @apply rounded-lg px-3 py-1.5 text-sm text-slate-500 transition-all duration-200
+      hover:bg-slate-100 hover:text-slate-700
+      disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-danger {
+    @apply rounded-lg px-3 py-1.5 text-sm text-red-600 transition-all duration-200
+      hover:bg-red-50;
+  }
+
+  .dropdown-menu { @apply absolute z-50 bg-surface-1 border border-slate-200 rounded-lg shadow-dropdown py-1 animate-fade-in; }
+  .dropdown-item { @apply w-full text-left px-4 py-2 text-sm text-slate-600 transition-colors duration-150 hover:bg-slate-50 hover:text-slate-800; }
+  .dropdown-item-danger { @apply w-full text-left px-4 py-2 text-sm text-red-600 transition-colors duration-150 hover:bg-red-50; }
+}

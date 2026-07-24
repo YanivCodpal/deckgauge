@@ -1,0 +1,27 @@
+node_modules/
+.turbo/
+dist/
+.next/
+coverage/
+*.js.map
+*.d.ts
+*.d.ts.map
+*.tsbuildinfo
+.env
+.env.local
+.DS_Store
+.worktrees/
+.claude/
+.superpowers/
+build-output.txt
+apps/web/test-results/
+apps/api/uploads/
+backups/
+.codegraph/
+
+# License signing material + generated licenses — NEVER commit
+.license-keys/
+*.license
+
+# Personal commercialization docs — keep out of git
+Business Plan/

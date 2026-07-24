@@ -1,0 +1,12 @@
+# Azure DevOps configuration — copy to azure-devops.yaml and fill in values.
+# On worker startup, if no AzureDevOpsInstances exist in the DB,
+# the worker auto-imports from this file.
+
+instances:
+  - name: "My Org"
+    orgUrl: "https://dev.azure.com/myorg"
+    authMethod: PAT              # PAT or BASIC
+    accessToken: "your-pat-here"
+    # username: "user@example.com"  # only required for BASIC auth
+    projects:
+      - "MyProject"

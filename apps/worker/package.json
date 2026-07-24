@@ -1,0 +1,28 @@
+{
+  "name": "@deckgauge/worker",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc --build",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@octokit/rest": "^22.0.1",
+    "@deckgauge/db": "workspace:*",
+    "@deckgauge/shared": "workspace:*",
+    "bullmq": "^5.14.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.14.0",
+    "tsx": "^4.15.7",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

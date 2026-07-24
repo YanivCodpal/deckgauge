@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<!--
+  Local recovery override (2026-07-20): after an unclean Rancher Desktop shutdown,
+  cockpit.ado_transitions had several 0-byte truncated parts, and ClickHouse
+  crash-looped on boot because the broken-part count exceeded the default
+  max_suspicious_broken_parts (100). Raising the cap lets ClickHouse move the
+  broken parts to detached/ and start; ado_transitions refills on the next ADO
+  sync (it re-sweeps fully, no watermark). Safe to keep as durable resilience
+  against future unclean shutdowns, or remove once the parts are re-synced.
+-->
+<clickhouse>
+  <merge_tree>
+    <max_suspicious_broken_parts>1000</max_suspicious_broken_parts>
+  </merge_tree>
+</clickhouse>
