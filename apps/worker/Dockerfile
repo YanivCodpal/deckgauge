@@ -16,7 +16,9 @@ RUN pnpm install --no-frozen-lockfile
 # Copy source and generate Prisma client
 FROM deps AS build
 COPY packages/db/ packages/db/
-RUN pnpm --filter @deckgauge/db generate
+# generate the Prisma client AND build the lib — its package "main" is dist/index.js,
+# so without a build the api/worker crash: "Cannot find package @deckgauge/db/dist/index.js".
+RUN pnpm --filter @deckgauge/db generate && pnpm --filter @deckgauge/db build
 
 # Production
 FROM build AS runner
