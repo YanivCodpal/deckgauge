@@ -11,7 +11,7 @@ COPY apps/worker/package.json apps/worker/
 COPY packages/db/package.json packages/db/
 COPY packages/shared/package.json packages/shared/
 COPY packages/ui/package.json packages/ui/
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --no-frozen-lockfile
 
 # Copy source and generate Prisma client
 FROM deps AS build

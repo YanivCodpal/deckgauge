@@ -1,0 +1,32 @@
+{
+  "name": "deckgauge",
+  "version": "0.0.1",
+  "private": true,
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "backup": "bash scripts/backup.sh",
+    "restore": "bash scripts/restore.sh",
+    "migrate:clickhouse": "pnpm --filter @deckgauge/db migrate:clickhouse",
+    "seed:jira": "tsx scripts/seed-jira.ts",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^25.6.0",
+    "eslint": "^9.0.0",
+    "eslint-config-prettier": "^9.0.0",
+    "nock": "^14.0.12",
+    "prettier": "^3.0.0",
+    "turbo": "^2.0.0",
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^8.0.0"
+  }
+}

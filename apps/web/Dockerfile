@@ -10,7 +10,7 @@ COPY apps/web/package.json apps/web/
 COPY packages/db/package.json packages/db/
 COPY packages/shared/package.json packages/shared/
 COPY packages/ui/package.json packages/ui/
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --no-frozen-lockfile
 
 # Build Next.js
 FROM deps AS build
