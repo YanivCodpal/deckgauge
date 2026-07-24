@@ -178,8 +178,8 @@ services:
       test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3001/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))\""]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 15s
+      retries: 10
+      start_period: 90s
 
   web:
     build:
@@ -216,7 +216,10 @@ services:
       MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
     depends_on:
       api:
-        condition: service_healthy
+        # web is a standalone server and retries the API at request time, so it need
+        # only wait for the api container to start — not for it to pass its healthcheck
+        # (a cold tsx boot can exceed the grace window and would otherwise block web).
+        condition: service_started
 
   worker:
     build:
