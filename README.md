@@ -62,7 +62,7 @@ that can run commands). It fetches the setup skill and installs Deckgauge on you
 curl -fsSL https://deckgauge.com/install.md
 ```
 
-That’s it — the agent clones the repo, starts the stack, runs migrations, and hands you back
+That’s it — the agent clones the repo, starts the stack, sets up the database, and hands you back
 `http://localhost:3000`.
 
 ---
@@ -74,8 +74,8 @@ git clone https://github.com/YanivCodpal/deckgauge
 cd deckgauge
 cp .env.example .env
 docker compose up -d
-# apply migrations, then open http://localhost:3000
-docker compose run --rm api sh -c "cd /app/packages/db && npx prisma migrate deploy"
+# create the schema, then open http://localhost:3000
+docker compose run --rm api sh -c "cd /app/packages/db && npx prisma db push --skip-generate"
 ```
 
 Full setup — connecting sources, SSO, access control — is in the [docs](https://deckgauge.com/docs).

@@ -18,8 +18,8 @@ git clone https://github.com/YanivCodpal/deckgauge
 cd deckgauge
 cp .env.example .env
 docker compose up -d
-# apply Postgres migrations
-docker compose run --rm api sh -c "cd /app/packages/db && npx prisma migrate deploy"
+# create the database schema
+docker compose run --rm api sh -c "cd /app/packages/db && npx prisma db push --skip-generate"
 # create the ClickHouse analytics tables
 bash scripts/apply-clickhouse-schemas.sh
 ```
