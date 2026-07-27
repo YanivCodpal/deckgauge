@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { PrismaClient } from '@deckgauge/db';
 import { Queue } from 'bullmq';
+import { z } from 'zod';
 import {
   CreateAzureDevOpsInstanceInputSchema,
   UpdateAzureDevOpsInstanceInputSchema,
@@ -82,6 +83,19 @@ export async function azureDevOpsRoutes(
         if (err instanceof Error) message = err.message;
         return reply.send({ ok: false, error: message });
       }
+    },
+  );
+
+  // POST /azure-devops/instances/:id/refresh-token — swap stored credential
+  app.post<{ Params: { id: string } }>(
+    '/azure-devops/instances/:id/refresh-token',
+    async (req, reply) => {
+      const body = z.object({ token: z.string().min(1) }).safeParse(req.body);
+      if (!body.success) return reply.status(400).send({ error: body.error.flatten() });
+      const result = await service.refreshToken(req.params.id, body.data.token);
+      if (result.notFound) return reply.status(404).send({ error: 'Instance not found' });
+      if (!result.ok) return reply.status(422).send({ ok: false, error: result.error });
+      return reply.send({ ok: true });
     },
   );
 

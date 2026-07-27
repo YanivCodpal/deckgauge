@@ -12,8 +12,9 @@ import {
   GitHubSourcePicker,
   type GitHubInstanceOption,
   type BulkAttachResult,
-  type ReplaceTokenResult,
 } from './GitHubSourcePicker';
+import { SourceReconnectBanner } from './SourceReconnectBanner';
+import type { RemoteProjectsResult } from '../../actions/board-sources';
 
 export type { Provider } from './providers/roles';
 
@@ -40,7 +41,11 @@ export interface AttachResult {
 
 export interface AddNewActions {
   listConnections: (provider: Provider) => Promise<Array<{ id: string; name: string }>>;
-  listRemoteProjects: (provider: Provider, connectionId: string) => Promise<string[]>;
+  listRemoteProjects: (
+    provider: Provider,
+    connectionId: string,
+    search?: string,
+  ) => Promise<RemoteProjectsResult>;
   ensureSync: (
     provider: Provider,
     connectionId: string,
@@ -78,8 +83,14 @@ interface Props {
   githubInstances?: GitHubInstanceOption[];
   /** Bulk-binds selected GitHub repos and refreshes the list. Never rejects. */
   onBulkAttachGitHub?: (req: BulkBindRequest) => Promise<BulkAttachResult>;
-  /** Replaces an expired GitHub connection token from within the picker. Never rejects. */
-  onReplaceGitHubToken?: (instanceId: string, token: string) => Promise<ReplaceTokenResult>;
+  /** Replaces an expired connection token (validate-before-swap). Never rejects. */
+  onReplaceToken?: (
+    provider: Provider,
+    connectionId: string,
+    token: string,
+  ) => Promise<{ ok: boolean; error?: string }>;
+  /** When set, the wizard opens directly on the pick step for this provider. */
+  initialProvider?: Provider;
 }
 
 type Step = 'provider' | 'pick' | 'review';
@@ -95,10 +106,11 @@ export function BoardAddSource({
   addNewActions,
   githubInstances,
   onBulkAttachGitHub,
-  onReplaceGitHubToken,
+  onReplaceToken,
+  initialProvider,
 }: Props) {
-  const [step, setStep] = useState<Step>('provider');
-  const [provider, setProvider] = useState<Provider | null>(null);
+  const [step, setStep] = useState<Step>(initialProvider ? 'pick' : 'provider');
+  const [provider, setProvider] = useState<Provider | null>(initialProvider ?? null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState('');
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -112,6 +124,7 @@ export function BoardAddSource({
   const [remoteSearch, setRemoteSearch] = useState('');
   const [subBusy, setSubBusy] = useState(false);
   const [subError, setSubError] = useState<string | null>(null);
+  const [reconnect, setReconnect] = useState(false);
 
   const goToProviderStep = () => {
     setStep('provider');
@@ -126,6 +139,7 @@ export function BoardAddSource({
     setRemoteProjects(null);
     setRemoteSearch('');
     setSubError(null);
+    setReconnect(false);
   };
 
   const advanceToPick = () => {
@@ -140,6 +154,7 @@ export function BoardAddSource({
     setRemoteProjects(null);
     setRemoteSearch('');
     setSubError(null);
+    setReconnect(false);
   };
 
   // GitHub uses the live repo picker (bulk-bind + backfill) instead of the
@@ -242,9 +257,18 @@ export function BoardAddSource({
     if (!provider || !addNewActions || !connectionId) return;
     setSubBusy(true);
     setSubError(null);
+    setReconnect(false);
     try {
-      const list = await addNewActions.listRemoteProjects(provider, connectionId);
-      setRemoteProjects(list);
+      const result = await addNewActions.listRemoteProjects(provider, connectionId, remoteSearch);
+      if (result.ok) {
+        setRemoteProjects(result.projects);
+      } else if (result.authFailed) {
+        setReconnect(true);
+        setRemoteProjects(null);
+      } else {
+        setSubError(result.error || 'Could not load projects for this connection.');
+        setRemoteProjects([]);
+      }
     } catch {
       setSubError('Could not load projects for this connection.');
       setRemoteProjects([]);
@@ -294,8 +318,15 @@ export function BoardAddSource({
       setConnections((prev) => [...prev, conn]);
       setConnectionId(conn.id);
       setNewConn(false);
-      const list = await addNewActions.listRemoteProjects(provider, conn.id);
-      setRemoteProjects(list);
+      const result = await addNewActions.listRemoteProjects(provider, conn.id, remoteSearch);
+      if (result.ok) {
+        setRemoteProjects(result.projects);
+      } else if (result.authFailed) {
+        setReconnect(true);
+      } else {
+        setSubError(result.error || 'Could not load projects for this connection.');
+        setRemoteProjects([]);
+      }
     } catch {
       setSubError('Could not create the connection.');
     } finally {
@@ -303,9 +334,13 @@ export function BoardAddSource({
     }
   };
 
+  // GitLab searches server-side (it can match on project name/description, not
+  // just the path), so re-applying a client-side path substring filter would
+  // wrongly hide valid matches — skip it for GitLab and trust the server list.
+  // Other providers load the full list once and filter it here.
   const filteredRemote = (remoteProjects ?? []).filter(
     (p) =>
-      p.toLowerCase().includes(remoteSearch.toLowerCase()) &&
+      (provider === 'gitlab' || p.toLowerCase().includes(remoteSearch.toLowerCase())) &&
       !(provider && isAttached(provider, p)),
   );
 
@@ -359,7 +394,11 @@ export function BoardAddSource({
             boardId={boardId ?? ''}
             instances={githubInstances ?? []}
             onBulkAttach={onBulkAttachGitHub!}
-            onReplaceToken={onReplaceGitHubToken}
+            onReplaceToken={
+              onReplaceToken
+                ? (instanceId, token) => onReplaceToken('github', instanceId, token)
+                : undefined
+            }
             onDone={onCancel}
             onCancel={goToProviderStep}
           />
@@ -367,13 +406,43 @@ export function BoardAddSource({
 
         {step === 'pick' && provider && !githubPickerMode && (
           <div>
+            {reconnect && onReplaceToken && connectionId && (
+              <SourceReconnectBanner
+                provider={provider}
+                onReplaceToken={(token) => onReplaceToken(provider, connectionId, token)}
+                onSuccess={() => {
+                  setReconnect(false);
+                  void loadRemoteProjects();
+                }}
+              />
+            )}
+            {!reconnect && (
+            <>
             {readyProviders[provider].length === 0 ? (
-              <p className="text-xs text-slate-500">
-                No existing {PROVIDER_LABEL[provider]} projects yet.{' '}
-                <a href="/sources" className="text-indigo-600 hover:underline">
-                  Set one up in Sources &rarr;
-                </a>
-              </p>
+              addNewActions ? (
+                !addingNew ? (
+                  <div className="text-xs text-slate-500">
+                    <p>
+                      No {PROVIDER_LABEL[provider]} projects connected yet. Connect{' '}
+                      {PROVIDER_LABEL[provider]} to pick projects to sync to this board.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={openAddNew}
+                      className="mt-2 inline-flex items-center gap-1 rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
+                    >
+                      Connect {PROVIDER_LABEL[provider]}
+                    </button>
+                  </div>
+                ) : null
+              ) : (
+                <p className="text-xs text-slate-500">
+                  No existing {PROVIDER_LABEL[provider]} projects yet.{' '}
+                  <a href="/sources" className="text-indigo-600 hover:underline">
+                    Set one up in Sources &rarr;
+                  </a>
+                </p>
+              )
             ) : (
               <>
                 <input
@@ -413,7 +482,7 @@ export function BoardAddSource({
               </>
             )}
 
-            {addNewActions && !addingNew && (
+            {addNewActions && !addingNew && readyProviders[provider].length > 0 && (
               <button
                 type="button"
                 className="mt-3 text-xs text-indigo-600 hover:underline"
@@ -463,41 +532,56 @@ export function BoardAddSource({
                         </option>
                       ))}
                     </select>
-                    <button
-                      type="button"
-                      className="text-xs px-2 py-1 rounded-md bg-indigo-600 text-white disabled:opacity-50"
-                      disabled={!connectionId || subBusy}
-                      onClick={loadRemoteProjects}
-                    >
-                      {subBusy ? 'Loading…' : 'Load projects'}
-                    </button>
+                    <div className="flex gap-2">
+                      <input
+                        className="flex-1 text-xs px-2 py-1.5 rounded-md border border-slate-200"
+                        aria-label="Search remote projects"
+                        placeholder="Search projects…"
+                        value={remoteSearch}
+                        disabled={!connectionId || subBusy}
+                        onChange={(e) => setRemoteSearch(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            void loadRemoteProjects();
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="text-xs px-2 py-1 rounded-md bg-indigo-600 text-white disabled:opacity-50 whitespace-nowrap"
+                        disabled={!connectionId || subBusy}
+                        onClick={loadRemoteProjects}
+                      >
+                        {subBusy ? 'Loading…' : remoteSearch.trim() ? 'Search' : 'Load projects'}
+                      </button>
+                    </div>
 
                     {remoteProjects !== null &&
                       (remoteProjects.length === 0 ? (
-                        <p className="text-xs text-slate-500">No projects found for this connection.</p>
+                        <p className="text-xs text-slate-500">
+                          No projects found
+                          {remoteSearch.trim() ? ` for “${remoteSearch.trim()}”` : ''}. Type a
+                          name and Search to find any project you can access.
+                        </p>
+                      ) : filteredRemote.length === 0 ? (
+                        <p className="text-xs text-slate-500">
+                          Every matching project is already attached to this board.
+                        </p>
                       ) : (
-                        <>
-                          <input
-                            className="w-full text-xs px-2 py-1.5 rounded-md border border-slate-200"
-                            aria-label="Search remote projects"
-                            placeholder="Search projects…"
-                            value={remoteSearch}
-                            onChange={(e) => setRemoteSearch(e.target.value)}
-                          />
-                          <div className="max-h-40 overflow-auto space-y-1">
-                            {filteredRemote.map((p) => (
-                              <button
-                                key={p}
-                                type="button"
-                                className="w-full text-left px-2 py-1.5 rounded-md text-xs font-mono hover:bg-indigo-50 disabled:opacity-50"
-                                disabled={subBusy}
-                                onClick={() => chooseRemoteProject(p)}
-                              >
-                                {p}
-                              </button>
-                            ))}
-                          </div>
-                        </>
+                        <div className="max-h-40 overflow-auto space-y-1">
+                          {filteredRemote.map((p) => (
+                            <button
+                              key={p}
+                              type="button"
+                              className="w-full text-left px-2 py-1.5 rounded-md text-xs font-mono hover:bg-indigo-50 disabled:opacity-50"
+                              disabled={subBusy}
+                              onClick={() => chooseRemoteProject(p)}
+                            >
+                              {p}
+                            </button>
+                          ))}
+                        </div>
                       ))}
                     {!subBusy && (
                       <button
@@ -511,6 +595,8 @@ export function BoardAddSource({
                   </>
                 )}
               </div>
+            )}
+            </>
             )}
           </div>
         )}

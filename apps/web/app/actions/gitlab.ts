@@ -1,6 +1,8 @@
 // EI-030 — GitLab server actions.
 'use server';
 
+import type { RemoteProjectsResult } from './board-sources';
+
 interface GitLabInstance {
   id: string;
   name: string;
@@ -121,15 +123,26 @@ export async function createGitLabInstanceReturning(input: {
   return (await resp.json()) as { id: string };
 }
 
-export async function listGitLabRemoteProjects(instanceId: string): Promise<string[]> {
+export async function listGitLabRemoteProjects(
+  instanceId: string,
+  search?: string,
+): Promise<RemoteProjectsResult> {
   try {
-    const resp = await fetch(`${base()}/gitlab/instances/${encodeURIComponent(instanceId)}/projects`, {
-      cache: 'no-store',
-    });
-    if (!resp.ok) return [];
+    const term = search?.trim();
+    const url = new URL(`${base()}/gitlab/instances/${encodeURIComponent(instanceId)}/projects`);
+    if (term) url.searchParams.set('search', term);
+    const resp = await fetch(url, { cache: 'no-store' });
+    if (!resp.ok) {
+      const authFailed = resp.status === 401 || resp.status === 403;
+      // Surface the API's message (e.g. a base-URL/HTML-parse error) instead of a
+      // bare status, so a misconfigured connection is diagnosable from the UI.
+      const body = (await resp.json().catch(() => ({}))) as { error?: unknown };
+      const detail = typeof body.error === 'string' ? body.error : `Discovery failed (${resp.status})`;
+      return { ok: false, authFailed, error: detail };
+    }
     const data = (await resp.json()) as { projects?: string[] };
-    return data.projects ?? [];
+    return { ok: true, projects: data.projects ?? [] };
   } catch {
-    return [];
+    return { ok: false, authFailed: false, error: 'Could not reach GitLab.' };
   }
 }

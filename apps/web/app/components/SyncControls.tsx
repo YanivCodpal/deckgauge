@@ -1,7 +1,14 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { triggerBoardSync, fetchBoardSyncStatus, type BoardSyncStatus } from '../actions/board-sync';
+import { useRouter } from 'next/navigation';
+import {
+  triggerBoardSync,
+  fetchBoardSyncStatus,
+  fetchBoardSourceHealth,
+  type BoardSyncStatus,
+  type BoardSourceHealth,
+} from '../actions/board-sync';
 
 interface SyncControlsProps {
   boardId: string;
@@ -12,17 +19,31 @@ const POLL_INTERVAL_MS = 1000;
 const POLL_MAX_ITERATIONS = 30;
 
 export function SyncControls({ boardId, userRole }: SyncControlsProps) {
+  const router = useRouter();
   const [status, setStatus] = useState<BoardSyncStatus | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [toast, setToast] = useState<{ kind: 'error' | 'info' | 'success'; text: string } | null>(null);
+  const [toast, setToast] = useState<{ kind: 'error' | 'info' | 'success'; text: string } | null>(
+    null
+  );
+  const [expired, setExpired] = useState<BoardSourceHealth[]>([]);
+  const [fixOpen, setFixOpen] = useState(false);
 
   const loadStatus = useCallback(async () => {
     setStatus(await fetchBoardSyncStatus(boardId));
   }, [boardId]);
 
+  const loadHealth = useCallback(async () => {
+    const h = await fetchBoardSourceHealth(boardId);
+    setExpired(h ? h.sources.filter((s) => s.state === 'expired') : []);
+  }, [boardId]);
+
   useEffect(() => {
     void loadStatus();
   }, [loadStatus]);
+
+  useEffect(() => {
+    void loadHealth();
+  }, [loadHealth]);
 
   useEffect(() => {
     if (!toast) return;
@@ -47,6 +68,11 @@ export function SyncControls({ boardId, userRole }: SyncControlsProps) {
         return;
       }
 
+      if (result.expired && result.expired.length > 0) {
+        setExpired(result.expired);
+        setFixOpen(true);
+      }
+
       const startedAt = status?.finishedAt ?? null;
       for (let i = 0; i < POLL_MAX_ITERATIONS; i++) {
         await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
@@ -64,7 +90,13 @@ export function SyncControls({ boardId, userRole }: SyncControlsProps) {
     } finally {
       setIsSyncing(false);
       void loadStatus();
+      void loadHealth();
     }
+  };
+
+  const goFix = (s: BoardSourceHealth) => {
+    setFixOpen(false);
+    router.push(`/boards/${boardId}/sources?fix=${s.provider}:${s.instanceId}`);
   };
 
   const lastSyncedLabel = status?.finishedAt
@@ -86,6 +118,15 @@ export function SyncControls({ boardId, userRole }: SyncControlsProps) {
           {isSyncing ? 'Syncing...' : 'Sync Now'}
         </button>
       )}
+      {expired.length > 0 && (
+        <button
+          type="button"
+          onClick={() => goFix(expired[0])}
+          className="rounded bg-rose-100 px-2 py-0.5 text-xs font-medium text-rose-700 hover:bg-rose-200"
+        >
+          ⚠ Token expired
+        </button>
+      )}
       {toast && (
         <div
           className={`fixed bottom-6 right-6 z-50 glass-elevated px-4 py-3 text-sm animate-slide-up ${
@@ -97,6 +138,42 @@ export function SyncControls({ boardId, userRole }: SyncControlsProps) {
           }`}
         >
           {toast.text}
+        </div>
+      )}
+      {fixOpen && expired.length > 0 && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+          <div className="glass-elevated w-full max-w-md rounded-lg p-5">
+            <h3 className="text-sm font-semibold text-slate-900">
+              Sync can&apos;t reach some connections
+            </h3>
+            <p className="mt-1 text-xs text-slate-500">
+              These source tokens are expired — those sources were skipped.
+            </p>
+            <ul className="mt-3 space-y-1 text-sm text-slate-700">
+              {expired.map((s) => (
+                <li key={`${s.provider}:${s.instanceId}`}>
+                  <span className="font-medium capitalize">{s.provider}</span> — {s.label}
+                  <span className="text-rose-600"> · token expired</span>
+                </li>
+              ))}
+            </ul>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setFixOpen(false)}
+                className="btn-secondary text-xs px-3 py-1.5"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={() => goFix(expired[0])}
+                className="rounded bg-indigo-600 px-3 py-1.5 text-xs text-white hover:bg-indigo-700"
+              >
+                Update token
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -1,6 +1,7 @@
 'use server';
 
 import { authFetch } from './api';
+import type { RemoteProjectsResult } from './board-sources';
 
 // --- Azure DevOps Instances ---
 
@@ -254,13 +255,20 @@ export async function deleteAzureDevOpsProjectSync(id: string): Promise<boolean>
   } catch { return false; }
 }
 
-export async function listAzureDevOpsRemoteProjects(instanceId: string): Promise<string[]> {
+export async function listAzureDevOpsRemoteProjects(
+  instanceId: string,
+): Promise<RemoteProjectsResult> {
   try {
-    const res = await authFetch(`/azure-devops/instances/${instanceId}/projects`, { cache: 'no-store' });
-    if (!res.ok) return [];
+    const res = await authFetch(`/azure-devops/instances/${instanceId}/projects`, {
+      cache: 'no-store',
+    });
+    if (!res.ok) {
+      const authFailed = res.status === 401 || res.status === 403;
+      return { ok: false, authFailed, error: `Discovery failed (${res.status})` };
+    }
     const data = (await res.json()) as { projects?: string[] };
-    return data.projects ?? [];
+    return { ok: true, projects: data.projects ?? [] };
   } catch {
-    return [];
+    return { ok: false, authFailed: false, error: 'Could not reach Azure DevOps.' };
   }
 }

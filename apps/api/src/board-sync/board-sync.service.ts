@@ -42,7 +42,10 @@ export class BoardSyncService {
     private readonly queues: IntelligenceQueues,
   ) {}
 
-  async enqueueBoardSync(boardId: string): Promise<EnqueueCounts> {
+  async enqueueBoardSync(
+    boardId: string,
+    skipInstanceIds: Set<string> = new Set(),
+  ): Promise<EnqueueCounts> {
     const [jiraSrcs, githubSrcs, adoSrcs, gitlabSrcs] = await Promise.all([
       this.prisma.boardJiraSource.findMany({
         where: { boardId },
@@ -82,6 +85,10 @@ export class BoardSyncService {
       (r) => r.gitlabProjectSync.gitlabInstance.id,
       (r) => r.gitlabProjectSync.projectPath,
     );
+
+    for (const groups of [jiraGroups, githubGroups, adoGroups, gitlabGroups]) {
+      for (const instanceId of skipInstanceIds) groups.delete(instanceId);
+    }
 
     const firstError: { current: Error | null } = { current: null };
     const tryAdd = async (

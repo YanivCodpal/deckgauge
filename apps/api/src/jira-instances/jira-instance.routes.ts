@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { PrismaClient } from "@deckgauge/db";
+import { z } from "zod";
 import { JiraInstanceService } from "./jira-instance.service.js";
 import {
   CreateJiraInstanceInputSchema,
@@ -106,6 +107,22 @@ export async function jiraInstanceRoutes(
           delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
         }
       }
+    },
+  );
+
+  // POST /jira/instances/:id/refresh-token — validate and swap the API token
+  app.post<{ Params: { id: string } }>(
+    "/jira/instances/:id/refresh-token",
+    async (req, reply) => {
+      const body = z.object({ token: z.string().min(1) }).safeParse(req.body);
+      if (!body.success)
+        return reply.status(400).send({ error: body.error.flatten() });
+      const result = await service.refreshToken(req.params.id, body.data.token);
+      if (result.notFound)
+        return reply.status(404).send({ error: "Instance not found" });
+      if (!result.ok)
+        return reply.status(422).send({ ok: false, error: result.error });
+      return reply.send({ ok: true });
     },
   );
 

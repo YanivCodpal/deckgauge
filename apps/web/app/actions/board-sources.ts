@@ -9,6 +9,13 @@ import { authFetch } from './api';
  */
 export type AttachOutcome<T> = { ok: true; row: T } | { ok: false; error: string };
 
+/** Result of discovering a connection's remote projects — distinguishes an
+ *  expired/invalid token (401/403) from other failures so the UI can offer a
+ *  reconnect flow. */
+export type RemoteProjectsResult =
+  | { ok: true; projects: string[] }
+  | { ok: false; authFailed: boolean; error: string };
+
 /** Extract a human-readable message from a non-ok API response. */
 async function readApiError(res: Response): Promise<string> {
   const text = await res.text();

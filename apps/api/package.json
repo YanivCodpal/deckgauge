@@ -29,6 +29,7 @@
     "jwks-rsa": "^4.0.1",
     "minimatch": "10",
     "node-sql-parser": "^5.4.0",
+    "undici": "^6.21.1",
     "xlsx": "^0.18.5",
     "zod": "^4.3.6"
   },

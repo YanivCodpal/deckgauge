@@ -4,6 +4,8 @@ declare module 'next-auth' {
   interface Session extends DefaultSession {
     user: DefaultSession['user'] & { id: string };
     accessToken?: string;
+    /** Raw Keycloak OIDC id_token, used as id_token_hint for federated logout. */
+    idToken?: string;
     error?: string;
   }
 }

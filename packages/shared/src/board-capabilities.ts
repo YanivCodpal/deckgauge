@@ -14,9 +14,15 @@ export interface BoardCapabilities {
   calendarSource: boolean;
   /** A card can be onboarded into an org tree as an employee. */
   onboardTarget: boolean;
+  /** After creation, route the user to the Sources tab to connect a provider. */
+  sourceOnboarding: boolean;
 }
 
-const NONE: BoardCapabilities = { calendarSource: false, onboardTarget: false };
+const NONE: BoardCapabilities = {
+  calendarSource: false,
+  onboardTarget: false,
+  sourceOnboarding: false,
+};
 
 /**
  * The capabilities a board of the given kind has. Accepts a raw string (the
@@ -25,7 +31,9 @@ const NONE: BoardCapabilities = { calendarSource: false, onboardTarget: false };
 export function boardCapabilities(kind: string): BoardCapabilities {
   switch (kind) {
     case 'recruitment':
-      return { calendarSource: true, onboardTarget: true };
+      return { calendarSource: true, onboardTarget: true, sourceOnboarding: false };
+    case 'development':
+      return { ...NONE, sourceOnboarding: true };
     default:
       return NONE;
   }

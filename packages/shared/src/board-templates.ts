@@ -52,6 +52,14 @@ export interface TemplateGroup {
   color: string;
 }
 
+/** Richer copy for the Create dialog (the flyout preview uses `description`). */
+export interface BoardTemplateExplainer {
+  /** One short paragraph describing what the board is for. */
+  summary: string;
+  /** 2–3 "what you get" bullets. */
+  highlights: readonly string[];
+}
+
 /** Auxiliary views a template seeds, beyond the always-present BOARD view. */
 export interface TemplateViews {
   /** Dashboard preset to seed, or null for no dashboard (statistics). */
@@ -66,6 +74,8 @@ export interface BoardTemplate {
   label: string;
   /** One-line helper text under the label. */
   description: string;
+  /** Richer copy for the Create dialog (the flyout preview uses `description`). */
+  explainer: BoardTemplateExplainer;
   /** Seed the default "Size" status column (the roadmap's size source). */
   includeSizeColumn: boolean;
   /** Pipeline groups to seed, in order. Empty for non-pipeline boards. */
@@ -94,6 +104,10 @@ const BLANK_TEMPLATE: BoardTemplate = {
   kind: 'blank',
   label: 'Blank board',
   description: 'An empty board — just rows and the status column.',
+  explainer: {
+    summary: 'A clean board with just rows and a status column — shape it however you like.',
+    highlights: ['Start from scratch with no preset pipeline', 'Add your own columns and groups'],
+  },
   includeSizeColumn: true,
   groups: [],
   extraColumns: [],
@@ -105,6 +119,15 @@ const DEVELOPMENT_TEMPLATE: BoardTemplate = {
   label: 'Development',
   description:
     'Delivery board with the engineering-intelligence dashboard and roadmap. Connect Jira/GitHub/ADO/GitLab after creating.',
+  explainer: {
+    summary:
+      'A delivery board that turns your issue tracker and git activity into live engineering-intelligence analytics and a roadmap.',
+    highlights: [
+      'Connect Jira, GitHub, Azure DevOps, or GitLab',
+      'The engineering-intelligence dashboard fills in automatically',
+      'The roadmap sizes itself from your issues',
+    ],
+  },
   includeSizeColumn: true,
   groups: [],
   extraColumns: [],
@@ -115,6 +138,14 @@ const RECRUITMENT_TEMPLATE: BoardTemplate = {
   kind: 'recruitment',
   label: 'Recruitment',
   description: 'Track candidates through interview stages, with feedback, salary, and offers.',
+  explainer: {
+    summary: 'Track candidates through your interview pipeline, from sourced to hired.',
+    highlights: [
+      'Preset interview-stage groups',
+      'Role, interview date, salary, and decision columns',
+      'Ingest interviews from a connected calendar',
+    ],
+  },
   includeSizeColumn: false,
   groups: [
     { name: 'New / Sourced', color: '#579BFC' },

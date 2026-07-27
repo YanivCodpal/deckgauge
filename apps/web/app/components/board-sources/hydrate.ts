@@ -9,6 +9,7 @@ export function hydrateJira(row: Record<string, unknown>): SourceShape {
     id: r.id,
     provider: 'jira',
     name: r.jiraProjectSync?.jiraProjectKey ?? r.jiraProjectKey ?? '(unknown)',
+    instanceId: r.jiraProjectSync?.jiraInstanceId ?? r.jiraProjectSync?.jiraInstance?.id ?? '',
     // BoardJiraSource only stores `lastPromotedAt`; the "last sync" timestamp
     // the UI cares about lives on the related JiraProjectSync row.
     lastSyncedAt: r.jiraProjectSync?.lastSyncedAt ?? r.lastSyncedAt ?? null,
@@ -28,6 +29,7 @@ export function hydrateGitHub(row: Record<string, unknown>): SourceShape {
     id: r.id,
     provider: 'github',
     name: r.gitHubRepoSync?.repoFullName ?? r.repoFullName ?? '(unknown)',
+    instanceId: r.gitHubRepoSync?.githubInstanceId ?? r.gitHubRepoSync?.githubInstance?.id ?? '',
     // The bulk-repo sync model tracks last sync as `lastSuccessAt`.
     lastSyncedAt: r.gitHubRepoSync?.lastSuccessAt ?? r.gitHubRepoSync?.lastSyncedAt ?? r.lastSyncedAt ?? null,
     syncIssuesToBoard: r.syncIssuesToBoard ?? true,
@@ -60,6 +62,10 @@ export function hydrateAdo(row: Record<string, unknown>): SourceShape {
     // The board source references the shared project sync; the id lets the
     // wizard PATCH the connection's code-sync scope inline.
     azureDevOpsProjectSyncId: r.azureDevOpsProjectSyncId ?? r.azureDevOpsProjectSync?.id ?? '',
+    instanceId:
+      r.azureDevOpsProjectSync?.azureDevOpsInstanceId ??
+      r.azureDevOpsProjectSync?.azureDevOpsInstance?.id ??
+      '',
     lastSyncedAt: r.azureDevOpsProjectSync?.lastSyncedAt ?? r.lastSyncedAt ?? null,
     syncWorkItemsToBoard: r.syncWorkItemsToBoard ?? true,
     useForIntelligence: r.useForIntelligence ?? true,
@@ -86,6 +92,7 @@ export function hydrateGitLab(row: Record<string, unknown>): SourceShape {
     id: r.id,
     provider: 'gitlab',
     name: r.gitlabProjectSync?.projectPath ?? r.projectPath ?? '(unknown)',
+    instanceId: r.gitlabProjectSync?.gitlabInstanceId ?? r.gitlabProjectSync?.gitlabInstance?.id ?? '',
     lastSyncedAt: r.gitlabProjectSync?.lastSyncedAt ?? r.lastSyncedAt ?? null,
     zoneValue: {
       syncIssuesToBoard: r.syncIssuesToBoard ?? false,

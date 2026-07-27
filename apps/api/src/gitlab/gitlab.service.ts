@@ -15,6 +15,29 @@ export interface CreateGitLabProjectSyncInput {
   syncCommits?: boolean;
 }
 
+type RefreshResult = { ok: boolean; error?: string; notFound?: boolean };
+
+/** Carries the upstream GitLab HTTP status so the route can preserve 401/403
+ *  (which drives the picker's reconnect flow) instead of flattening to 422. */
+export class GitLabApiError extends Error {
+  constructor(readonly status: number) {
+    super(`GitLab API error: ${status}`);
+    this.name = 'GitLabApiError';
+  }
+}
+
+/**
+ * Normalize a GitLab base URL to its REST API root. Users naturally paste the
+ * instance web URL (e.g. `https://code.digi.is`), but the REST API lives under
+ * `/api/v4`. Without this the code hits the web UI, which returns an HTML login
+ * page — that then fails JSON parsing and surfaces as "no projects found".
+ * Idempotent: a base that already ends in `/api/vN` is returned untouched.
+ */
+export function gitlabApiBase(baseUrl: string): string {
+  const trimmed = baseUrl.replace(/\/+$/, '');
+  return /\/api\/v\d+$/.test(trimmed) ? trimmed : `${trimmed}/api/v4`;
+}
+
 export class GitLabService {
   constructor(
     private readonly prisma: PrismaClient,
@@ -39,7 +62,7 @@ export class GitLabService {
     return this.prisma.gitLabInstance.create({
       data: {
         name: input.name,
-        baseUrl: input.baseUrl ?? 'https://gitlab.com/api/v4',
+        baseUrl: gitlabApiBase(input.baseUrl ?? 'https://gitlab.com/api/v4'),
         accessToken: input.accessToken,
         projects: input.projects,
       },
@@ -80,15 +103,17 @@ export class GitLabService {
     await this.prisma.gitLabProjectSync.delete({ where: { id } });
   }
 
-  async testConnection(instanceId: string): Promise<{ ok: boolean; error?: string }> {
-    const instance = await this.prisma.gitLabInstance.findUnique({
-      where: { id: instanceId },
-      select: { baseUrl: true, accessToken: true },
-    });
-    if (!instance) return { ok: false, error: 'Instance not found' };
-    const url = `${instance.baseUrl.replace(/\/$/, '')}/user`;
+  private async probeToken(
+    baseUrl: string,
+    token: string,
+    fetchFn = this.fetchFn,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const url = `${gitlabApiBase(baseUrl)}/user`;
     try {
-      const res = await this.fetchFn(url, { headers: { 'PRIVATE-TOKEN': instance.accessToken } });
+      const res = await fetchFn(url, {
+        headers: { 'PRIVATE-TOKEN': token },
+        signal: AbortSignal.timeout(10000),
+      });
       if (!res.ok) {
         const text = await res.text();
         return { ok: false, error: `GitLab returned ${res.status}: ${text}` };
@@ -99,21 +124,82 @@ export class GitLabService {
     }
   }
 
-  async listRemoteProjects(instanceId: string): Promise<string[]> {
+  async testConnection(instanceId: string): Promise<{ ok: boolean; error?: string }> {
+    const instance = await this.prisma.gitLabInstance.findUnique({
+      where: { id: instanceId },
+      select: { baseUrl: true, accessToken: true },
+    });
+    if (!instance) return { ok: false, error: 'Instance not found' };
+    return this.probeToken(instance.baseUrl, instance.accessToken);
+  }
+
+  async updateInstanceToken(id: string, accessToken: string) {
+    const existing = await this.prisma.gitLabInstance.findUnique({ where: { id } });
+    if (!existing) return null;
+    return this.prisma.gitLabInstance.update({ where: { id }, data: { accessToken } });
+  }
+
+  async refreshToken(
+    id: string,
+    newToken: string,
+    fetchFn = this.fetchFn,
+  ): Promise<RefreshResult> {
+    const instance = await this.prisma.gitLabInstance.findUnique({
+      where: { id },
+      select: { baseUrl: true, accessToken: true },
+    });
+    if (!instance) return { ok: false, notFound: true, error: 'Instance not found' };
+    const probe = await this.probeToken(instance.baseUrl, newToken, fetchFn);
+    if (!probe.ok) return probe;
+    const updated = await this.updateInstanceToken(id, newToken);
+    if (!updated) return { ok: false, notFound: true, error: 'Instance not found' };
+    return { ok: true };
+  }
+
+  /**
+   * List projects for the picker.
+   *
+   * - No `search` term → the caller's own projects (`membership=true`).
+   * - With a term → the caller's own *matching* projects first (`membership=true`
+   *   + `search`); only if that is empty do we widen to every project the token
+   *   can see (`search`, no membership). This keeps gitlab.com results scoped to
+   *   the user's projects (a bare `search` there returns public projects across
+   *   the whole platform, which would bury or exclude the user's own repo under
+   *   the 100-row cap), while still letting self-managed users — who often have
+   *   instance-wide read access but no formal project membership — find projects.
+   *
+   * Capped at 100 rows; the search box is how you narrow past that.
+   */
+  async listRemoteProjects(instanceId: string, search?: string): Promise<string[]> {
     const instance = await this.prisma.gitLabInstance.findUnique({
       where: { id: instanceId },
       select: { baseUrl: true, accessToken: true },
     });
     if (!instance) throw new Error(`GitLab instance not found: ${instanceId}`);
 
-    const url = `${instance.baseUrl.replace(/\/$/, '')}/projects?membership=true&simple=true&per_page=100`;
-    const res = await this.fetchFn(url, {
-      headers: { 'PRIVATE-TOKEN': instance.accessToken },
-    });
-    if (!res.ok) {
-      throw new Error(`GitLab API error: ${res.status}`);
+    const base = gitlabApiBase(instance.baseUrl);
+    const fetchProjects = async (extra: Record<string, string>) => {
+      const params = new URLSearchParams({
+        simple: 'true',
+        per_page: '100',
+        order_by: 'last_activity_at',
+        ...extra,
+      });
+      const res = await this.fetchFn(`${base}/projects?${params.toString()}`, {
+        headers: { 'PRIVATE-TOKEN': instance.accessToken },
+      });
+      if (!res.ok) {
+        throw new GitLabApiError(res.status);
+      }
+      return (await res.json()) as Array<{ path_with_namespace: string }>;
+    };
+
+    const term = search?.trim();
+    if (!term) {
+      return (await fetchProjects({ membership: 'true' })).map((p) => p.path_with_namespace);
     }
-    const data = (await res.json()) as Array<{ path_with_namespace: string }>;
-    return data.map((p) => p.path_with_namespace);
+    const mine = await fetchProjects({ membership: 'true', search: term });
+    const rows = mine.length > 0 ? mine : await fetchProjects({ search: term });
+    return rows.map((p) => p.path_with_namespace);
   }
 }

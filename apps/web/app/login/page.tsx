@@ -7,19 +7,6 @@ export default function LoginPage() {
   const searchParams = useSearchParams();
   const callbackUrl = searchParams.get('callbackUrl') ?? '/';
 
-  const keycloakIssuer = process.env.NEXT_PUBLIC_KEYCLOAK_ISSUER ?? 'http://localhost:8080/realms/vp-cockpit';
-  const keycloakClientId = process.env.NEXT_PUBLIC_KEYCLOAK_CLIENT_ID ?? 'vp-cockpit-web';
-  const redirectUri = typeof window !== 'undefined'
-    ? `${window.location.origin}/api/auth/callback/keycloak`
-    : 'http://localhost:3000/api/auth/callback/keycloak';
-
-  const registrationUrl =
-    `${keycloakIssuer}/protocol/openid-connect/registrations` +
-    `?client_id=${encodeURIComponent(keycloakClientId)}` +
-    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
-    `&response_type=code` +
-    `&scope=openid`;
-
   return (
     <div className="min-h-screen flex flex-col bg-surface-0">
       {/* App shell nav bar */}
@@ -63,12 +50,12 @@ export default function LoginPage() {
               </div>
             </div>
 
-            <a
-              href={registrationUrl}
-              className="btn-secondary inline-block w-full text-center"
+            <button
+              onClick={() => signIn('keycloak-register', { callbackUrl })}
+              className="btn-secondary w-full"
             >
               Create an account
-            </a>
+            </button>
           </div>
         </div>
       </div>

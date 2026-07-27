@@ -2,7 +2,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { PrismaClient } from '@deckgauge/db';
-import { GitLabService } from './gitlab.service.js';
+import { GitLabService, GitLabApiError } from './gitlab.service.js';
 
 const CreateInstanceSchema = z.object({
   name: z.string().min(1),
@@ -70,14 +70,32 @@ export function gitlabRoutes({ prisma }: { prisma: PrismaClient }) {
       return reply.send(result);
     });
 
+    app.post('/gitlab/instances/:id/refresh-token', async (req, reply) => {
+      const params = z.object({ id: z.string().uuid() }).safeParse(req.params);
+      if (!params.success) return reply.code(400).send({ error: params.error.flatten() });
+      const body = z.object({ token: z.string().min(1) }).safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: body.error.flatten() });
+      const result = await service.refreshToken(params.data.id, body.data.token);
+      if (result.notFound) return reply.code(404).send({ error: 'Instance not found' });
+      if (!result.ok) return reply.code(422).send({ ok: false, error: result.error });
+      return reply.send({ ok: true });
+    });
+
     app.get('/gitlab/instances/:id/projects', async (req, reply) => {
       const params = z.object({ id: z.string().uuid() }).safeParse(req.params);
       if (!params.success) return reply.code(400).send({ error: params.error.flatten() });
+      const query = z.object({ search: z.string().optional() }).safeParse(req.query);
+      if (!query.success) return reply.code(400).send({ error: query.error.flatten() });
       try {
-        const projects = await service.listRemoteProjects(params.data.id);
+        const projects = await service.listRemoteProjects(params.data.id, query.data.search);
         return reply.send({ projects });
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown error';
+        // Preserve 401/403 so the web layer can detect an expired/invalid token
+        // and offer the reconnect flow; other upstream errors surface as 422.
+        if (err instanceof GitLabApiError && (err.status === 401 || err.status === 403)) {
+          return reply.code(err.status).send({ error: message });
+        }
         if (/not found/i.test(message)) return reply.code(404).send({ error: message });
         return reply.code(422).send({ error: message });
       }

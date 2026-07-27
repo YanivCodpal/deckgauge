@@ -190,3 +190,91 @@ export async function deleteGitLabProjectSync(id: string): Promise<void> {
   const res = await authFetch(`/project-syncs/gitlab/${id}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(await res.text());
 }
+
+// ---- Instances: list (normalized), refresh token, test ----
+
+export interface SourceInstanceRow {
+  id: string;
+  label: string;
+  sublabel: string;
+}
+
+export interface RefreshResult {
+  ok: boolean;
+  error?: string;
+}
+
+async function refreshTokenAt(path: string, token: string): Promise<RefreshResult> {
+  const res = await authFetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+  if (res.ok) return { ok: true };
+  try {
+    const body = (await res.json()) as { error?: string };
+    return { ok: false, error: body.error ?? `Request failed: ${res.status}` };
+  } catch {
+    return { ok: false, error: `Request failed: ${res.status}` };
+  }
+}
+
+async function testConnectionAt(path: string): Promise<RefreshResult> {
+  const res = await authFetch(path, { method: 'POST' });
+  if (res.ok) return { ok: true };
+  try {
+    const body = (await res.json()) as { error?: string };
+    return { ok: false, error: body.error ?? `Request failed: ${res.status}` };
+  } catch {
+    return { ok: false, error: `Request failed: ${res.status}` };
+  }
+}
+
+async function listInstancesRaw(path: string): Promise<Record<string, unknown>[]> {
+  const res = await authFetch(path, { method: 'GET' });
+  if (!res.ok) throw new Error(`list instances failed: ${res.status}`);
+  return res.json();
+}
+
+export async function listJiraInstances(): Promise<SourceInstanceRow[]> {
+  const rows = await listInstancesRaw('/jira/instances');
+  return rows.map((r) => ({ id: String(r.id), label: String(r.name ?? r.atlassianUrl), sublabel: String(r.email ?? '') }));
+}
+export async function listGitHubInstances(): Promise<SourceInstanceRow[]> {
+  const rows = await listInstancesRaw('/github/instances');
+  return rows.map((r) => ({ id: String(r.id), label: String(r.org || 'GitHub'), sublabel: String(r.baseUrl ?? '') }));
+}
+export async function listAdoInstances(): Promise<SourceInstanceRow[]> {
+  const rows = await listInstancesRaw('/azure-devops/instances');
+  return rows.map((r) => ({ id: String(r.id), label: String(r.name ?? r.orgUrl), sublabel: String(r.orgUrl ?? '') }));
+}
+export async function listGitLabInstances(): Promise<SourceInstanceRow[]> {
+  const rows = await listInstancesRaw('/gitlab/instances');
+  return rows.map((r) => ({ id: String(r.id), label: String(r.name ?? 'GitLab'), sublabel: String(r.baseUrl ?? '') }));
+}
+
+export async function refreshJiraToken(id: string, token: string) {
+  return refreshTokenAt(`/jira/instances/${id}/refresh-token`, token);
+}
+export async function refreshGitHubToken(id: string, token: string) {
+  return refreshTokenAt(`/github/instances/${id}/refresh-token`, token);
+}
+export async function refreshAdoToken(id: string, token: string) {
+  return refreshTokenAt(`/azure-devops/instances/${id}/refresh-token`, token);
+}
+export async function refreshGitLabToken(id: string, token: string) {
+  return refreshTokenAt(`/gitlab/instances/${id}/refresh-token`, token);
+}
+
+export async function testJiraConnection(id: string) {
+  return testConnectionAt(`/jira/instances/${id}/test`);
+}
+export async function testGitHubConnection(id: string) {
+  return testConnectionAt(`/github/instances/${id}/test`);
+}
+export async function testAdoConnection(id: string) {
+  return testConnectionAt(`/azure-devops/instances/${id}/test`);
+}
+export async function testGitLabConnection(id: string) {
+  return testConnectionAt(`/gitlab/instances/${id}/test`);
+}

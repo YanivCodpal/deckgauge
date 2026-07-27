@@ -26,7 +26,13 @@ import { boardsOnlyTree, collectRoadmaps, isBoardNode, isRoadmapNode, matchesQue
 import { updateBoardPref, updateFolder, deleteFolder, createFolder, createBoard } from '../../actions/board-tree';
 import { createOrgTree } from '../../actions/org-trees';
 import { createComparison, type ComparisonSummary } from '../../actions/comparison';
-import { BOARD_TEMPLATES, type BoardKind } from '@deckgauge/shared';
+import {
+  BOARD_TEMPLATES,
+  getBoardTemplate,
+  boardCapabilities,
+  type BoardKind,
+} from '@deckgauge/shared';
+import { CreateEntityDialog } from './CreateEntityDialog';
 import { createRoadmap, updateRoadmapPref, deleteRoadmap } from '../../actions/roadmap';
 import type { FolderHandlers } from './FolderNode';
 
@@ -114,6 +120,53 @@ const MENU_ICONS = {
   ),
 };
 
+/** What the Create dialog is currently creating. */
+type CreateTarget =
+  | { type: 'board'; kind: BoardKind }
+  | { type: 'roadmap' }
+  | { type: 'orgTree' }
+  | { type: 'comparison' };
+
+/** Dialog copy for the non-board entities (boards derive theirs from the template). */
+const ENTITY_COPY: Record<
+  'roadmap' | 'orgTree' | 'comparison',
+  { title: string; summary: string; highlights: string[]; nameLabel: string; namePlaceholder: string }
+> = {
+  roadmap: {
+    title: 'Roadmap',
+    summary: 'A quarter-by-quarter timeline of initiatives, sized and scheduled.',
+    highlights: [
+      'Drag initiatives across quarters',
+      'Sizes roll up from linked boards',
+      'Share a delivery view with stakeholders',
+    ],
+    nameLabel: 'Roadmap name',
+    namePlaceholder: 'e.g. Q3 Delivery',
+  },
+  orgTree: {
+    title: 'Org / employees',
+    summary: 'An org chart of your team with per-engineer workload, timesheets, and analytics.',
+    highlights: [
+      'Build your reporting hierarchy',
+      'Per-engineer workload & timesheets',
+      'Connect a directory source (Graph or CSV)',
+    ],
+    nameLabel: 'Org tree name',
+    namePlaceholder: 'e.g. Engineering Org',
+  },
+  comparison: {
+    title: 'Comparison',
+    summary: 'Put several boards side by side to compare delivery metrics.',
+    highlights: [
+      'Pick any set of boards',
+      'Compare velocity, DORA, and more',
+      'Spot outliers across teams',
+    ],
+    nameLabel: 'Comparison name',
+    namePlaceholder: 'e.g. Squad A vs B',
+  },
+};
+
 type TreeHandlers = FolderHandlers & {
   onMoveBoard: (boardId: string, folderId: string | null) => void;
   onMoveRoadmap: (roadmapId: string, folderId: string | null) => void;
@@ -140,11 +193,18 @@ export function BoardSidebar({
   const { collapsed, toggleCollapsed, activeType, setActiveType, isSectionOpen, toggleSection } =
     useSidebarUiState();
   const [query, setQuery] = useState('');
+  const [createTarget, setCreateTarget] = useState<CreateTarget | null>(null);
+  const [creating, setCreating] = useState(false);
 
   // Roadmaps render at /roadmap/<id>. Mirror page.tsx's resolution so the
   // highlighted node always matches what's on screen.
   const activeRoadmapId = pathname?.match(/^\/roadmap\/([^/]+)/)?.[1] ?? null;
-  const effectiveActiveId = activeRoadmapId ?? searchParams.get('boardId') ?? activeBoardId;
+  // Board sub-views (Sources, Intelligence, Insights, board-scoped Roadmap) render at
+  // /boards/<id>/... with no ?boardId. Read the board from the path so the sidebar
+  // highlights it, instead of falling back to the last-board cookie (activeBoardId).
+  const activeBoardPathId = pathname?.match(/^\/boards\/([^/]+)/)?.[1] ?? null;
+  const effectiveActiveId =
+    activeRoadmapId ?? activeBoardPathId ?? searchParams.get('boardId') ?? activeBoardId;
   const activeOrgTreeId = pathname === '/timesheet' ? searchParams.get('orgTreeId') : null;
 
   const openBoard = useCallback(
@@ -285,16 +345,13 @@ export function BoardSidebar({
   };
 
   // ---- New menu ----
-  const handleNewBoard = useCallback(
-    async (template: BoardKind) => {
-      const name = window.prompt('New board name');
-      if (name && name.trim()) {
-        const board = await createBoard(name.trim(), template);
-        openBoard(board.id);
-      }
-    },
-    [openBoard],
-  );
+  const handleNewBoard = useCallback((template: BoardKind) => {
+    setCreateTarget({ type: 'board', kind: template });
+  }, []);
+  const handleNewRoadmap = useCallback(() => setCreateTarget({ type: 'roadmap' }), []);
+  const handleNewOrgTree = useCallback(() => setCreateTarget({ type: 'orgTree' }), []);
+  const handleNewComparison = useCallback(() => setCreateTarget({ type: 'comparison' }), []);
+
   const handleNewFolder = useCallback(async () => {
     const name = window.prompt('New folder name');
     if (name && name.trim()) {
@@ -302,42 +359,118 @@ export function BoardSidebar({
       after();
     }
   }, [after]);
-  const handleNewRoadmap = useCallback(async () => {
-    const name = window.prompt('New roadmap name');
-    if (name && name.trim()) {
-      const roadmap = await createRoadmap(name.trim());
-      router.push(`/roadmap/${roadmap.id}`);
-    }
-  }, [router]);
-  const handleNewOrgTree = useCallback(async () => {
-    const name = window.prompt('New org tree name');
-    if (name && name.trim()) {
-      const created = await createOrgTree(name.trim());
-      router.push(`/org/${created.id}`);
-    }
-  }, [router]);
-  const handleNewComparison = useCallback(async () => {
-    const name = window.prompt('New comparison name');
-    if (name && name.trim()) {
-      const created = await createComparison(name.trim());
-      router.push(`/comparison/${created.id}`);
-    }
-  }, [router]);
+
+  // The dialog collects + trims the name; each target creates its entity and routes.
+  const confirmCreate = useCallback(
+    async (name: string) => {
+      if (!createTarget) return;
+      setCreating(true);
+      try {
+        switch (createTarget.type) {
+          case 'board': {
+            const board = await createBoard(name, createTarget.kind);
+            if (boardCapabilities(createTarget.kind).sourceOnboarding) {
+              setLastBoardCookie(board.id);
+              router.push(`/boards/${board.id}/sources`);
+            } else {
+              openBoard(board.id);
+            }
+            break;
+          }
+          case 'roadmap': {
+            const created = await createRoadmap(name);
+            router.push(`/roadmap/${created.id}`);
+            break;
+          }
+          case 'orgTree': {
+            const created = await createOrgTree(name);
+            router.push(`/org/${created.id}`);
+            break;
+          }
+          case 'comparison': {
+            const created = await createComparison(name);
+            router.push(`/comparison/${created.id}`);
+            break;
+          }
+        }
+        setCreateTarget(null);
+      } finally {
+        setCreating(false);
+      }
+    },
+    [createTarget, router, openBoard],
+  );
+
+  // Display copy for the create dialog, derived from the current target.
+  const createDialogProps = !createTarget
+    ? null
+    : createTarget.type === 'board'
+      ? {
+          title: getBoardTemplate(createTarget.kind).label,
+          icon: MENU_ICONS.board,
+          summary: getBoardTemplate(createTarget.kind).explainer.summary,
+          highlights: getBoardTemplate(createTarget.kind).explainer.highlights as readonly string[],
+          footnote: boardCapabilities(createTarget.kind).sourceOnboarding
+            ? 'Next: connect Jira, GitHub, Azure DevOps, or GitLab.'
+            : undefined,
+          nameLabel: 'Board name',
+          namePlaceholder: 'e.g. Platform Team',
+        }
+      : {
+          title: ENTITY_COPY[createTarget.type].title,
+          icon:
+            createTarget.type === 'roadmap'
+              ? MENU_ICONS.roadmap
+              : createTarget.type === 'orgTree'
+                ? MENU_ICONS.orgTree
+                : MENU_ICONS.comparison,
+          summary: ENTITY_COPY[createTarget.type].summary,
+          highlights: ENTITY_COPY[createTarget.type].highlights as readonly string[],
+          footnote: undefined as string | undefined,
+          nameLabel: ENTITY_COPY[createTarget.type].nameLabel,
+          namePlaceholder: ENTITY_COPY[createTarget.type].namePlaceholder,
+        };
 
   // Board-type picker: one entry per template (auto-extends as templates are added),
-  // then the org/employees route (a separate domain, not a board template).
+  // grouped under "Boards". Each carries the template's own one-line description.
   const boardTemplateItems: NewMenuItem[] = BOARD_TEMPLATES.map((t) => ({
-    label: `New board · ${t.label}`,
+    label: t.label,
+    description: t.description,
+    section: 'Boards',
     icon: MENU_ICONS.board,
     onSelect: () => handleNewBoard(t.kind),
   }));
 
   const newItems: NewMenuItem[] = [
     ...boardTemplateItems,
-    { label: 'New folder', icon: MENU_ICONS.folder, onSelect: handleNewFolder },
-    { label: 'New roadmap', icon: MENU_ICONS.roadmap, onSelect: handleNewRoadmap },
-    { label: 'New org / employees', icon: MENU_ICONS.orgTree, onSelect: handleNewOrgTree },
-    { label: 'New comparison', icon: MENU_ICONS.comparison, onSelect: handleNewComparison },
+    {
+      label: 'Roadmap',
+      description: 'A quarter-by-quarter timeline of initiatives, sized and scheduled.',
+      section: 'Plan & analyze',
+      icon: MENU_ICONS.roadmap,
+      onSelect: handleNewRoadmap,
+    },
+    {
+      label: 'Org / employees',
+      description: 'An org chart with per-engineer workload, timesheets, and analytics.',
+      section: 'Plan & analyze',
+      icon: MENU_ICONS.orgTree,
+      onSelect: handleNewOrgTree,
+    },
+    {
+      label: 'Comparison',
+      description: 'Put several boards side by side to compare delivery metrics.',
+      section: 'Plan & analyze',
+      icon: MENU_ICONS.comparison,
+      onSelect: handleNewComparison,
+    },
+    {
+      label: 'Folder',
+      description: 'A container to group boards and roadmaps in the sidebar.',
+      section: 'Organize',
+      icon: MENU_ICONS.folder,
+      onSelect: handleNewFolder,
+    },
   ];
 
   return (
@@ -414,6 +547,21 @@ export function BoardSidebar({
 
           <SidebarNewMenu items={newItems} />
         </div>
+      )}
+
+      {createDialogProps && (
+        <CreateEntityDialog
+          title={createDialogProps.title}
+          icon={createDialogProps.icon}
+          summary={createDialogProps.summary}
+          highlights={createDialogProps.highlights}
+          footnote={createDialogProps.footnote}
+          nameLabel={createDialogProps.nameLabel}
+          namePlaceholder={createDialogProps.namePlaceholder}
+          isPending={creating}
+          onCancel={() => setCreateTarget(null)}
+          onCreate={confirmCreate}
+        />
       )}
     </aside>
   );

@@ -1,6 +1,7 @@
 'use server';
 
 import { authFetch } from './api';
+import type { RemoteProjectsResult } from './board-sources';
 
 // --- Jira Instances ---
 
@@ -47,16 +48,25 @@ export async function testJiraConnection(instanceId: string) {
   }
 }
 
-export async function discoverJiraProjects(instanceId: string) {
+export async function discoverJiraProjects(
+  instanceId: string,
+): Promise<RemoteProjectsResult> {
   try {
-    const res = await authFetch(
-      `/jira/instances/${instanceId}/projects`,
-      { method: 'POST', cache: 'no-store' },
-    );
-    if (!res.ok) return [];
-    return await res.json();
+    const res = await authFetch(`/jira/instances/${instanceId}/projects`, {
+      method: 'POST',
+      cache: 'no-store',
+    });
+    if (!res.ok) {
+      const authFailed = res.status === 401 || res.status === 403;
+      return { ok: false, authFailed, error: `Discovery failed (${res.status})` };
+    }
+    const data = (await res.json()) as Array<{ key?: string; projectKey?: string } | string>;
+    const projects = data
+      .map((p) => (typeof p === 'string' ? p : p.key ?? p.projectKey ?? ''))
+      .filter((s): s is string => s.length > 0);
+    return { ok: true, projects };
   } catch {
-    return [];
+    return { ok: false, authFailed: false, error: 'Could not reach Jira.' };
   }
 }
 

@@ -427,8 +427,14 @@ export {
 export {
   BoardSyncEnqueueResponseSchema,
   BoardSyncStatusResponseSchema,
+  SourceHealthStateSchema,
+  BoardSourceHealthSchema,
+  BoardSourceHealthResponseSchema,
   type BoardSyncEnqueueResponse,
   type BoardSyncStatusResponse,
+  type SourceHealthState,
+  type BoardSourceHealth,
+  type BoardSourceHealthResponse,
 } from './board-sync';
 
 export {

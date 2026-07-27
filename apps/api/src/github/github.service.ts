@@ -13,6 +13,8 @@ type ProjectsAdapterFactory = (cfg: AdapterConfig) => GitHubProjectsPort;
 
 export type GitHubInstancePublic = Omit<GitHubInstance, 'accessToken'> & { accessToken: '***' };
 
+export type RefreshResult = { ok: boolean; error?: string; notFound?: boolean };
+
 function mask(instance: GitHubInstance): GitHubInstancePublic {
   return { ...instance, accessToken: '***' as const };
 }
@@ -83,18 +85,16 @@ export class GitHubService {
     return row ? (row as GitHubInstance) : null;
   }
 
-  async testConnection(
-    instanceId: string,
+  private async probeToken(
+    baseUrl: string,
+    token: string,
     fetchFn: FetchFn = fetch,
   ): Promise<{ ok: boolean; error?: string }> {
-    const instance = await this.getRawInstanceById(instanceId);
-    if (!instance) return { ok: false, error: 'Instance not found' };
-
-    const baseUrl = instance.baseUrl.replace(/\/+$/, '');
+    const base = baseUrl.replace(/\/+$/, '');
     try {
-      const res = await fetchFn(`${baseUrl}/user`, {
+      const res = await fetchFn(`${base}/user`, {
         headers: {
-          Authorization: `Bearer ${instance.accessToken}`,
+          Authorization: `Bearer ${token}`,
           Accept: 'application/vnd.github+json',
           'X-GitHub-Api-Version': '2022-11-28',
         },
@@ -114,6 +114,29 @@ export class GitHubService {
       }
       return { ok: false, error: message };
     }
+  }
+
+  async testConnection(
+    instanceId: string,
+    fetchFn: FetchFn = fetch,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const instance = await this.getRawInstanceById(instanceId);
+    if (!instance) return { ok: false, error: 'Instance not found' };
+    return this.probeToken(instance.baseUrl, instance.accessToken, fetchFn);
+  }
+
+  async refreshToken(
+    id: string,
+    newToken: string,
+    fetchFn: FetchFn = fetch,
+  ): Promise<RefreshResult> {
+    const instance = await this.getRawInstanceById(id);
+    if (!instance) return { ok: false, notFound: true, error: 'Instance not found' };
+    const probe = await this.probeToken(instance.baseUrl, newToken, fetchFn);
+    if (!probe.ok) return probe;
+    const updated = await this.updateInstanceToken(id, { accessToken: newToken });
+    if (!updated) return { ok: false, notFound: true, error: 'Instance not found' };
+    return { ok: true };
   }
 
   async discoverRepos(instanceId: string, fetchFn: FetchFn = fetch): Promise<string[] | null> {

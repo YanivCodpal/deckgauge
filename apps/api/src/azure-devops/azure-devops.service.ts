@@ -9,6 +9,9 @@ export type AzureDevOpsInstancePublic = Omit<AzureDevOpsInstance, 'accessToken'>
   accessToken: '***';
 };
 
+type FetchFn = typeof fetch;
+type RefreshResult = { ok: boolean; error?: string; notFound?: boolean };
+
 function mask(instance: AzureDevOpsInstance): AzureDevOpsInstancePublic {
   return { ...instance, accessToken: '***' as const };
 }
@@ -72,5 +75,65 @@ export class AzureDevOpsService {
       where: { source: 'azure-devops' },
       orderBy: { startedAt: 'desc' },
     });
+  }
+
+  private async probeToken(
+    params: { orgUrl: string; authMethod: string; username: string | null; token: string },
+    fetchFn: FetchFn = fetch,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const url = `${params.orgUrl.replace(/\/+$/, '')}/_apis/projects?$top=1&api-version=7.0`;
+    const authHeader =
+      params.authMethod === 'PAT'
+        ? `Basic ${Buffer.from(`:${params.token}`).toString('base64')}`
+        : `Basic ${Buffer.from(`${params.username ?? ''}:${params.token}`).toString('base64')}`;
+    try {
+      const res = await fetchFn(url, {
+        headers: { Authorization: authHeader },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) return { ok: false, error: `Azure DevOps returned ${res.status}` };
+      return { ok: true };
+    } catch (err: unknown) {
+      return { ok: false, error: err instanceof Error ? err.message : 'Connection failed' };
+    }
+  }
+
+  async testConnection(
+    id: string,
+    fetchFn: FetchFn = fetch,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const instance = await this.getRawInstanceById(id);
+    if (!instance) return { ok: false, error: 'Instance not found' };
+    return this.probeToken(
+      {
+        orgUrl: instance.orgUrl,
+        authMethod: instance.authMethod,
+        username: instance.username,
+        token: instance.accessToken,
+      },
+      fetchFn,
+    );
+  }
+
+  async refreshToken(
+    id: string,
+    newToken: string,
+    fetchFn: FetchFn = fetch,
+  ): Promise<RefreshResult> {
+    const instance = await this.getRawInstanceById(id);
+    if (!instance) return { ok: false, notFound: true, error: 'Instance not found' };
+    const probe = await this.probeToken(
+      {
+        orgUrl: instance.orgUrl,
+        authMethod: instance.authMethod,
+        username: instance.username,
+        token: newToken,
+      },
+      fetchFn,
+    );
+    if (!probe.ok) return probe;
+    const updated = await this.updateInstance(id, { accessToken: newToken });
+    if (!updated) return { ok: false, notFound: true, error: 'Instance not found' };
+    return { ok: true };
   }
 }

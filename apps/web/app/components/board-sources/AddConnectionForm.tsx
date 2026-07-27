@@ -2,6 +2,7 @@
 import { useState } from 'react';
 import { PROVIDER_CONNECTION_FIELDS, requiredKeys } from './providers/connection-fields';
 import { PROVIDER_LABEL, type Provider } from './providers/roles';
+import { TokenTutorial } from './providers/TokenTutorial';
 
 interface Props {
   provider: Provider;
@@ -38,6 +39,7 @@ export function AddConnectionForm({ provider, busy, onSubmit, onCancel }: Props)
       <p className="text-[11px] uppercase tracking-wider text-slate-400">
         New {PROVIDER_LABEL[provider]} connection
       </p>
+      <TokenTutorial provider={provider} />
       {fields.map((f) => (
         <div key={f.key}>
           <label className="block text-[11px] text-slate-500" htmlFor={`conn-${f.key}`}>

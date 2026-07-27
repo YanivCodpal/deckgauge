@@ -45,6 +45,24 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         userinfo: `${process.env.KEYCLOAK_INTERNAL_URL}/protocol/openid-connect/userinfo`,
       }),
     }),
+    // Sign-up entry point. Same Keycloak client, but the browser is sent to the
+    // registration endpoint instead of the login form. Routing through a real
+    // provider (rather than a hand-built URL) means NextAuth generates and stores
+    // the PKCE verifier + state, so the callback validates — the previous hand-rolled
+    // link skipped that and produced "pkceCodeVerifier could not be parsed".
+    // (This Keycloak ignores prompt=create, so we target /registrations directly.)
+    Keycloak({
+      id: 'keycloak-register',
+      name: 'Keycloak',
+      clientId: process.env.KEYCLOAK_CLIENT_ID!,
+      clientSecret: process.env.KEYCLOAK_CLIENT_SECRET!,
+      issuer: process.env.KEYCLOAK_ISSUER!,
+      authorization: `${process.env.KEYCLOAK_ISSUER}/protocol/openid-connect/registrations`,
+      ...(process.env.KEYCLOAK_INTERNAL_URL && {
+        token: `${process.env.KEYCLOAK_INTERNAL_URL}/protocol/openid-connect/token`,
+        userinfo: `${process.env.KEYCLOAK_INTERNAL_URL}/protocol/openid-connect/userinfo`,
+      }),
+    }),
   ],
   callbacks: {
     authorized({ auth }) {
@@ -56,6 +74,9 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           ...token,
           accessToken: account.access_token,
           refreshToken: account.refresh_token,
+          // Kept so we can pass it as id_token_hint to Keycloak's end-session
+          // endpoint on sign-out (RP-initiated / federated logout).
+          idToken: account.id_token,
           expiresAt: account.expires_at,
         };
       }
@@ -83,6 +104,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         ...session,
         user: { ...session.user, id: token.sub },
         accessToken: token.accessToken as string,
+        idToken: token.idToken as string | undefined,
         error: token.error as string | undefined,
       };
     },

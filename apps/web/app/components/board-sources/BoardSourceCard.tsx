@@ -6,12 +6,33 @@ import { AdoBoardZone, type AdoZoneValue } from './zone-board/AdoBoardZone';
 import { JiraBoardZone, type JiraZoneValue } from './zone-board/JiraBoardZone';
 import { GitLabBoardZone, type GitLabZoneValue } from './zone-board/GitLabBoardZone';
 import type { BoardStatusOption } from './StatusMappingEditor';
+import { TokenRefreshBox } from '../connections/TokenRefreshBox';
+import {
+  refreshJiraToken,
+  refreshGitHubToken,
+  refreshAdoToken,
+  refreshGitLabToken,
+} from '../../actions/connections';
+
+const HEALTH_BADGE: Record<'valid' | 'expired' | 'unreachable', { label: string; cls: string }> = {
+  valid: { label: 'Valid', cls: 'bg-emerald-100 text-emerald-700' },
+  expired: { label: 'Expired', cls: 'bg-rose-100 text-rose-700' },
+  unreachable: { label: 'Unreachable', cls: 'bg-amber-100 text-amber-700' },
+};
+
+const REFRESH_BY_PROVIDER = {
+  jira: refreshJiraToken,
+  github: refreshGitHubToken,
+  ado: refreshAdoToken,
+  gitlab: refreshGitLabToken,
+} as const;
 
 export type ProviderName = 'jira' | 'github' | 'ado' | 'gitlab';
 
 type SourceCommon = {
   id: string;
   name: string;
+  instanceId: string;
   lastSyncedAt: string | null;
 };
 
@@ -54,7 +75,7 @@ interface Props {
   // scope; the parent persists it separately from the board-source `patch`.
   onSave: (
     patch: Record<string, unknown>,
-    connectionPatch?: AdoConnectionPatch,
+    connectionPatch?: AdoConnectionPatch
   ) => Promise<void> | void;
   // Persists a status-mapping change without bundling the card's other
   // unsaved draft fields. Owned by BoardSourcesList so the in-memory sources
@@ -63,6 +84,8 @@ interface Props {
   onSaveStatusMapping: (mapping: Record<string, string>) => Promise<void>;
   onSaveAllowedIssueTypes: (types: string[]) => Promise<void>;
   onDetach: () => Promise<void> | void;
+  health?: 'valid' | 'expired' | 'unreachable';
+  openFix?: boolean;
 }
 
 function BadgeFor({ provider }: { provider: ProviderName }) {
@@ -87,12 +110,24 @@ function CollapsedChips({ source }: { source: SourceShape }) {
   const chips: Array<{ label: string; tone: 'on' | 'off' | 'intel' }> = [];
   switch (source.provider) {
     case 'github':
-      chips.push({ label: source.syncIssuesToBoard ? 'issues' : 'no issues', tone: source.syncIssuesToBoard ? 'on' : 'off' });
-      chips.push({ label: source.useForIntelligence ? 'code' : 'code skipped', tone: source.useForIntelligence ? 'intel' : 'off' });
+      chips.push({
+        label: source.syncIssuesToBoard ? 'issues' : 'no issues',
+        tone: source.syncIssuesToBoard ? 'on' : 'off',
+      });
+      chips.push({
+        label: source.useForIntelligence ? 'code' : 'code skipped',
+        tone: source.useForIntelligence ? 'intel' : 'off',
+      });
       break;
     case 'ado':
-      chips.push({ label: source.syncWorkItemsToBoard ? 'work items' : 'no work items', tone: source.syncWorkItemsToBoard ? 'on' : 'off' });
-      chips.push({ label: source.useForIntelligence ? 'code' : 'code skipped', tone: source.useForIntelligence ? 'intel' : 'off' });
+      chips.push({
+        label: source.syncWorkItemsToBoard ? 'work items' : 'no work items',
+        tone: source.syncWorkItemsToBoard ? 'on' : 'off',
+      });
+      chips.push({
+        label: source.useForIntelligence ? 'code' : 'code skipped',
+        tone: source.useForIntelligence ? 'intel' : 'off',
+      });
       break;
     case 'jira':
       chips.push({ label: 'issues', tone: 'on' });
@@ -107,9 +142,11 @@ function CollapsedChips({ source }: { source: SourceShape }) {
         <span
           key={i}
           className={`text-[10px] px-1.5 py-0.5 rounded ${
-            c.tone === 'on' ? 'bg-indigo-50 text-indigo-700' :
-            c.tone === 'intel' ? 'bg-cyan-50 text-cyan-700' :
-            'bg-slate-100 text-slate-500'
+            c.tone === 'on'
+              ? 'bg-indigo-50 text-indigo-700'
+              : c.tone === 'intel'
+                ? 'bg-cyan-50 text-cyan-700'
+                : 'bg-slate-100 text-slate-500'
           }`}
         >
           {c.label}
@@ -128,15 +165,17 @@ export function BoardSourceCard({
   onSaveStatusMapping,
   onSaveAllowedIssueTypes,
   onDetach,
+  health,
+  openFix,
 }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [draft, setDraft] = useState(source.zoneValue);
   const [draftUseForIntelligence, setDraftUFI] = useState<boolean>(
-    source.provider === 'github' || source.provider === 'ado' ? source.useForIntelligence : false,
+    source.provider === 'github' || source.provider === 'ado' ? source.useForIntelligence : false
   );
   // ADO only: editable draft of the shared project sync's code-sync scope.
   const [draftConnection, setDraftConnection] = useState<ConnectionState>(
-    source.provider === 'ado' ? source.connection : { syncPrs: false, syncCommits: false },
+    source.provider === 'ado' ? source.connection : { syncPrs: false, syncCommits: false }
   );
   const [error, setError] = useState<string | null>(null);
 
@@ -152,7 +191,9 @@ export function BoardSourceCard({
 
   async function handleSave() {
     if (!issuesOn && !codeOn) {
-      setError('At least one of issues/code must be enabled. Detach the source if you do not want either.');
+      setError(
+        'At least one of issues/code must be enabled. Detach the source if you do not want either.'
+      );
       return;
     }
     setError(null);
@@ -174,7 +215,9 @@ export function BoardSourceCard({
   }
 
   return (
-    <div className={`rounded-lg border ${expanded ? 'border-indigo-500 shadow-md' : 'border-slate-200'} bg-white overflow-hidden mb-2`}>
+    <div
+      className={`rounded-lg border ${expanded ? 'border-indigo-500 shadow-md' : 'border-slate-200'} bg-white overflow-hidden mb-2`}
+    >
       <button
         type="button"
         aria-label={expanded ? 'Collapse' : 'Expand'}
@@ -183,8 +226,25 @@ export function BoardSourceCard({
       >
         <BadgeFor provider={source.provider} />
         <span className="font-mono text-sm font-medium text-slate-900">{source.name}</span>
+        {health && (
+          <span
+            className={`ml-2 rounded px-2 py-0.5 text-xs font-medium ${HEALTH_BADGE[health].cls}`}
+          >
+            {HEALTH_BADGE[health].label}
+          </span>
+        )}
         <CollapsedChips source={source} />
       </button>
+
+      {(openFix || (health && health !== 'valid')) && (
+        <div className="px-3 pb-3">
+          <TokenRefreshBox
+            autoFocus={openFix}
+            note="This token is shared by every board using this connection."
+            onRefresh={(tok) => REFRESH_BY_PROVIDER[source.provider](source.instanceId, tok)}
+          />
+        </div>
+      )}
 
       {expanded && (
         <div className="p-3 border-t border-slate-100 space-y-3">
@@ -246,7 +306,12 @@ export function BoardSourceCard({
             </>
           )}
           {source.provider === 'gitlab' && (
-            <GitLabBoardZone value={draft as GitLabZoneValue} groups={groups} onChange={(v) => setDraft(v)} previewCount={null} />
+            <GitLabBoardZone
+              value={draft as GitLabZoneValue}
+              groups={groups}
+              onChange={(v) => setDraft(v)}
+              previewCount={null}
+            />
           )}
 
           {error && (

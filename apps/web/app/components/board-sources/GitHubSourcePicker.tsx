@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import type { BulkBindRequest, PickerResponse, GitHubPickerError } from '@deckgauge/shared';
 import { GitHubRepoPicker } from '../../boards/[boardId]/sources/components/GitHubRepoPicker';
+import { SourceReconnectBanner } from './SourceReconnectBanner';
 
 export interface GitHubInstanceOption {
   id: string;
@@ -63,15 +64,10 @@ export function GitHubSourcePicker({
   const [error, setError] = useState<string | null>(null);
   const [authFailed, setAuthFailed] = useState(false);
   const [reloadNonce, setReloadNonce] = useState(0);
-  const [newToken, setNewToken] = useState('');
-  const [savingToken, setSavingToken] = useState(false);
-  const [tokenError, setTokenError] = useState<string | null>(null);
 
   const selectInstance = (id: string) => {
     setInstanceId(id);
     setAuthFailed(false);
-    setTokenError(null);
-    setNewToken('');
   };
 
   const submit = async (req: Omit<BulkBindRequest, 'instanceId'>) => {
@@ -89,21 +85,6 @@ export function GitHubSourcePicker({
 
   const handlePickerError = (err: GitHubPickerError) => {
     setAuthFailed(err.code === 'github_auth_failed');
-  };
-
-  const replaceToken = async () => {
-    if (!onReplaceToken || savingToken || newToken.trim().length === 0) return;
-    setSavingToken(true);
-    setTokenError(null);
-    const result = await onReplaceToken(instanceId, newToken.trim());
-    setSavingToken(false);
-    if (result.ok) {
-      setNewToken('');
-      setAuthFailed(false);
-      setReloadNonce((n) => n + 1); // remount the picker → refetch with the new token
-      return;
-    }
-    setTokenError(result.error ?? 'Could not update the token.');
   };
 
   return (
@@ -135,35 +116,14 @@ export function GitHubSourcePicker({
       )}
 
       {authFailed && onReplaceToken && (
-        <div className="rounded-md border border-amber-300 bg-amber-50 p-3 space-y-2">
-          <p className="text-xs font-medium text-amber-800">
-            This GitHub connection&apos;s token is expired or invalid. Paste a new access token to
-            reconnect.
-          </p>
-          <div className="flex gap-2">
-            <input
-              type="password"
-              aria-label="New GitHub access token"
-              placeholder="ghp_…"
-              className="flex-1 text-xs px-2 py-1.5 rounded-md border border-slate-300"
-              value={newToken}
-              onChange={(e) => setNewToken(e.target.value)}
-            />
-            <button
-              type="button"
-              className="text-xs px-3 py-1.5 rounded-md bg-indigo-600 text-white disabled:opacity-50"
-              disabled={savingToken || newToken.trim().length === 0}
-              onClick={replaceToken}
-            >
-              {savingToken ? 'Updating…' : 'Update token & retry'}
-            </button>
-          </div>
-          {tokenError && (
-            <p className="text-xs text-rose-600" role="alert">
-              {tokenError}
-            </p>
-          )}
-        </div>
+        <SourceReconnectBanner
+          provider="github"
+          onReplaceToken={(token) => onReplaceToken(instanceId, token)}
+          onSuccess={() => {
+            setAuthFailed(false);
+            setReloadNonce((n) => n + 1); // remount the picker → refetch with the new token
+          }}
+        />
       )}
 
       <GitHubRepoPicker

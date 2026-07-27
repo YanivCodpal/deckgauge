@@ -3,6 +3,9 @@
 import { useSession, signOut } from 'next-auth/react';
 import { useState, useRef, useEffect } from 'react';
 
+const KEYCLOAK_ISSUER =
+  process.env.NEXT_PUBLIC_KEYCLOAK_ISSUER ?? 'http://localhost:8080/realms/vp-cockpit';
+
 function getInitials(name?: string | null, email?: string | null): string {
   if (name) {
     const parts = name.trim().split(/\s+/);
@@ -32,6 +35,21 @@ export function UserMenu() {
 
   const initials = getInitials(session.user.name, session.user.email);
 
+  // Federated (RP-initiated) logout: clear the local NextAuth session AND end the
+  // Keycloak SSO session, so the next sign-in shows a fresh login/registration
+  // screen instead of silently re-authenticating the same account.
+  async function handleSignOut() {
+    // Capture id_token before signOut clears the session; it lets Keycloak skip
+    // the logout-confirmation prompt.
+    const idTokenHint = session?.idToken;
+    const params = new URLSearchParams({
+      post_logout_redirect_uri: `${window.location.origin}/login`,
+    });
+    if (idTokenHint) params.set('id_token_hint', idTokenHint);
+    await signOut({ redirect: false });
+    window.location.href = `${KEYCLOAK_ISSUER}/protocol/openid-connect/logout?${params.toString()}`;
+  }
+
   return (
     <div className="relative" ref={menuRef}>
       <button
@@ -53,7 +71,7 @@ export function UserMenu() {
           </div>
           <div className="mx-2 border-t border-slate-100" />
           <button
-            onClick={() => signOut()}
+            onClick={handleSignOut}
             aria-label="Sign out"
             className="w-full px-4 py-2 text-left text-sm text-red-600 hover:bg-red-50 transition-colors"
           >
