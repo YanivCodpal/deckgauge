@@ -30,11 +30,18 @@ import { handleAzureDevOpsSyncJob } from './azure-devops-sync.handler.js'
 import { handleGitLabSyncJob } from './gitlab-sync.handler.js'
 import { handleJiraIntelligenceSync } from './jira-intelligence-sync.handler.js'
 import { runIntelligenceSync } from './github-intelligence-sync.handler.js'
+import {
+  handleGithubIntelligenceSync,
+  type GithubIntelligenceJobData,
+} from './github-intelligence-fanout.handler.js'
 import { handleAdoIntelligenceSync } from './ado-intelligence-sync.handler.js'
 import { Octokit } from '@octokit/rest'
 import { GITHUB_SYNC_QUEUE_NAMES, makeGitHubQueueClient } from '@deckgauge/shared'
 import { RateLimiter } from './github-rate-limiter.js'
-import { reconcileGitHubBackfills } from './github-backfill-reconciler.js'
+import {
+  reconcileGitHubBackfills,
+  reconcileGitHubSchedules,
+} from './github-backfill-reconciler.js'
 import { handleOrgTreeSyncJob } from './org-tree-sync/org-tree-sync.processor.js'
 import { handleOrgSourceSyncJob } from './org-source-sync/org-source-sync.processor.js'
 import { reconcileOrgSourceSync } from './org-source-sync/reconcile-org-source-sync.js'
@@ -147,21 +154,27 @@ await queue.add('jira-sync', { trigger: 'startup' }, { jobId: 'startup-job' })
 
 // Schedule repeating job every 15 minutes with dedup
 const repeatInterval = process.env.CRON_INTERVAL ? parseInt(process.env.CRON_INTERVAL) : 15 * 60 * 1000
-try {
-  await queue.add(
-    'jira-sync',
-    { trigger: 'scheduled' },
-    {
-      repeat: {
-        every: repeatInterval,
-      },
-      jobId: 'jira-sync-scheduled',
-    }
-  )
-} catch {
-  // If the job already exists, this will throw - that's ok, we have dedup
-  console.debug('Repeatable job already exists (dedup applied)')
+
+// Ensure exactly ONE repeatable schedule per queue. BullMQ keys repeatable jobs
+// by interval, so a prior run with a different CRON_INTERVAL (e.g. a test using
+// every=100ms against the shared Redis) leaves orphaned schedules that persist
+// forever — a 100ms jira-sync orphan once fired ~10x/s, flooding the worker and
+// OOM-looping it. Removing all existing repeatables before re-adding the single
+// intended one keeps exactly one schedule regardless of past intervals.
+async function scheduleRepeatable(
+  q: Queue,
+  jobName: string,
+  data: Record<string, unknown>,
+  everyMs: number,
+  jobId: string
+) {
+  for (const r of await q.getRepeatableJobs()) {
+    await q.removeRepeatableByKey(r.key)
+  }
+  await q.add(jobName, data, { repeat: { every: everyMs }, jobId })
 }
+
+await scheduleRepeatable(queue, 'jira-sync', { trigger: 'scheduled' }, repeatInterval, 'jira-sync-scheduled')
 
 // ── EI-014: GitLab sync queue ──────────────────────────────────────────────
 const gitlabPrAdapterFactory = (cfg: {
@@ -210,18 +223,7 @@ gitlabWorker.on('failed', (job, err) => {
   console.error(`GitLab job ${job?.id} failed: ${err.message}`)
 })
 
-try {
-  await gitlabQueue.add(
-    'gitlab-sync',
-    { trigger: 'scheduled' },
-    {
-      repeat: { every: repeatInterval },
-      jobId: 'gitlab-sync-scheduled',
-    },
-  )
-} catch {
-  console.debug('Repeatable gitlab-sync job already exists (dedup applied)')
-}
+await scheduleRepeatable(gitlabQueue, 'gitlab-sync', { trigger: 'scheduled' }, repeatInterval, 'gitlab-sync-scheduled')
 
 // ── EI-012/013/015: Phase 3 intelligence sync queues ───────────────────────
 const jiraIntelFactory = (cfg: { atlassianUrl: string; email: string; apiToken: string }) => {
@@ -283,11 +285,7 @@ const adoIntelQueue = makeIntelligenceQueue('ado-intelligence-sync', (data) =>
 )
 
 for (const q of [jiraIntelQueue, adoIntelQueue]) {
-  try {
-    await q.add(q.name, { trigger: 'scheduled' }, { repeat: { every: repeatInterval }, jobId: `${q.name}-scheduled` })
-  } catch {
-    console.debug(`Repeatable ${q.name} job already exists (dedup applied)`)
-  }
+  await scheduleRepeatable(q, q.name, { trigger: 'scheduled' }, repeatInterval, `${q.name}-scheduled`)
 }
 
 // ── GitHub bulk-repo ingestion: three-tier sync queues ────────────────────
@@ -328,6 +326,23 @@ makeTierWorker(GITHUB_SYNC_QUEUE_NAMES.hot, 4)
 makeTierWorker(GITHUB_SYNC_QUEUE_NAMES.warm, 2)
 makeTierWorker(GITHUB_SYNC_QUEUE_NAMES.cold, 1)
 
+// Consumer for the `github-intelligence-sync` queue. The api enqueues here from
+// the manual "Sync" button (board-sync.service + POST /intelligence/sync) with
+// { trigger, instanceId, repos }. Without this consumer those jobs pile up in
+// `wait` forever and github_commits / github_pull_requests never refresh on
+// demand. Fans out to the per-repo `runIntelligenceSync`, sharing the tier
+// workers' rate limiter so budget stays coordinated. No scheduled repeatable is
+// registered — the three-tier queues already own periodic per-repo syncs.
+makeIntelligenceQueue('github-intelligence-sync', (data) =>
+  handleGithubIntelligenceSync(
+    data as GithubIntelligenceJobData,
+    db,
+    makeOctokitForInstance,
+    githubBulkRateLimiter,
+    chClient,
+  ),
+)
+
 // Self-heal: re-enqueue an initial backfill for any active repo that never
 // completed one (e.g. attached while the api's enqueue was a no-op, or whose
 // earlier backfill kept erroring). Idempotent — re-adding the same repeatable
@@ -348,6 +363,23 @@ try {
 } catch (err) {
   console.error(
     `[GitHub backfill reconciler] failed: ${err instanceof Error ? err.message : String(err)}`,
+  )
+}
+
+// Self-heal: re-establish the tier repeatable for EVERY active repo (not just
+// un-backfilled ones). The repeatables live only in Redis (RDB-only, recreated
+// on deploy); a wipe drops the schedule for already-backfilled repos and the
+// backfill reconciler above skips them, so their scheduled sync stays dead
+// forever. This restores it on the next boot. Idempotent, no immediate run.
+try {
+  await reconcileGitHubSchedules({
+    prisma: db,
+    queueClient: githubBackfillQueueClient,
+    log: (message) => console.log(message),
+  })
+} catch (err) {
+  console.error(
+    `[GitHub schedule reconciler] failed: ${err instanceof Error ? err.message : String(err)}`,
   )
 }
 
@@ -394,15 +426,7 @@ adoWorker.on('failed', (job, err) => {
 await adoQueue.add('azure-devops-sync', { trigger: 'startup' }, { jobId: 'ado-startup-job' });
 
 // Schedule ADO repeating sync
-try {
-  await adoQueue.add(
-    'azure-devops-sync',
-    { trigger: 'scheduled' },
-    { repeat: { every: repeatInterval }, jobId: 'ado-sync-scheduled' },
-  );
-} catch {
-  console.debug('ADO repeatable job already exists (dedup applied)');
-}
+await scheduleRepeatable(adoQueue, 'azure-devops-sync', { trigger: 'scheduled' }, repeatInterval, 'ado-sync-scheduled');
 
 // ── GitHub sync ─────────────────────────────────────────────────────────────
 
@@ -446,15 +470,7 @@ ghWorker.on('failed', (job, err) => {
 await ghQueue.add('github-sync', { trigger: 'startup' }, { jobId: 'gh-startup-job' });
 
 // Schedule GitHub repeating sync
-try {
-  await ghQueue.add(
-    'github-sync',
-    { trigger: 'scheduled' },
-    { repeat: { every: repeatInterval }, jobId: 'gh-sync-scheduled' },
-  );
-} catch {
-  console.debug('GitHub repeatable job already exists (dedup applied)');
-}
+await scheduleRepeatable(ghQueue, 'github-sync', { trigger: 'scheduled' }, repeatInterval, 'gh-sync-scheduled');
 
 // Each org-source sync builds a directory client from the tree's OWN stored token.
 // Primary path: a user-pasted Graph access token (no app registration at all).
@@ -575,15 +591,7 @@ const pruneWorker = new Worker(
 pruneWorker.on('failed', (_job, err) => {
   console.error(`Prune job failed: ${err.message}`);
 });
-try {
-  await pruneQueue.add(
-    'sync-run-prune',
-    {},
-    { repeat: { every: 24 * 60 * 60 * 1000 }, jobId: 'daily-prune' },
-  );
-} catch {
-  console.debug('Prune repeatable job already exists (dedup applied)');
-}
+await scheduleRepeatable(pruneQueue, 'sync-run-prune', {}, 24 * 60 * 60 * 1000, 'daily-prune');
 
 console.log('Worker ready')
 

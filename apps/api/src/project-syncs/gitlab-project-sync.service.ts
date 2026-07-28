@@ -51,10 +51,14 @@ export class GitLabProjectSyncService {
   }
 
   async ensureSync(gitlabInstanceId: string, projectPath: string) {
+    // Default the code-sync flags ON. This is the path the board "add source"
+    // flow uses, and the board UI exposes no commits/PRs toggle for GitLab
+    // (unlike ADO). Creating with the flags off meant a GitLab source added
+    // from a board silently never synced commits/MRs — the SuperPay bug.
     return this.prisma.gitLabProjectSync.upsert({
       where: { gitlabInstanceId_projectPath: { gitlabInstanceId, projectPath } },
       update: {},
-      create: { gitlabInstanceId, projectPath, syncPrs: false, syncCommits: false },
+      create: { gitlabInstanceId, projectPath, syncPrs: true, syncCommits: true },
     });
   }
 }

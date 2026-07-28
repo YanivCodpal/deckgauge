@@ -26,6 +26,9 @@ export interface GitHubQueueClient {
     repoSyncId: string,
     tier: 'hot' | 'warm' | 'cold',
   ): Promise<void>;
+  // Re-establish a repo's repeatable schedule without firing an immediate run.
+  // For boot self-heal after a Redis wipe drops the tier schedules.
+  ensureScheduled(repoSyncId: string, tier: 'hot' | 'warm' | 'cold'): Promise<void>;
   removeRepeatables(repoSyncId: string): Promise<void>;
 }
 
@@ -48,6 +51,23 @@ export function makeGitHubQueueClient(queues: {
         { repoSyncId },
         {
           repeat: { every: GITHUB_SYNC_TIER_INTERVAL_MS[tier], immediately: true },
+          jobId: repoSyncId,
+          removeOnComplete: 100,
+          removeOnFail: 100,
+        },
+      );
+    },
+    async ensureScheduled(repoSyncId, tier) {
+      // No `immediately: true` — this only guarantees the repeatable exists so
+      // the tier's periodic sync resumes at its next interval boundary. Running
+      // it for every active repo on each boot must NOT trigger a full re-sync
+      // storm; the manual button / initial backfill cover on-demand freshness.
+      // Idempotent: re-adding the same jobId keeps the existing next-run time.
+      await queues[tier].add(
+        repoSyncId,
+        { repoSyncId },
+        {
+          repeat: { every: GITHUB_SYNC_TIER_INTERVAL_MS[tier] },
           jobId: repoSyncId,
           removeOnComplete: 100,
           removeOnFail: 100,

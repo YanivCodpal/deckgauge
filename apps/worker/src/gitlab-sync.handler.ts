@@ -89,28 +89,22 @@ export async function handleGitLabSyncJob(
     for (const ps of syncs) {
       try {
         const sinceMrs = ps.lastSyncedAt ?? undefined;
-        const { mergeRequests, commits } = await processGitLabSync({
+        const { mergeRequestsWritten, commitsWritten } = await processGitLabSync({
           projectPath: ps.projectPath,
           since: sinceMrs,
           syncCommits: ps.syncCommits,
           prAdapter,
           commitAdapter,
+          onMergeRequests: (rows) =>
+            ch.insertRows(
+              'gitlab_merge_requests',
+              rows as unknown as Array<Record<string, unknown>>,
+            ),
+          onCommits: (rows) =>
+            ch.insertRows('gitlab_commits', rows as unknown as Array<Record<string, unknown>>),
         });
-
-        if (mergeRequests.length > 0) {
-          await ch.insertRows(
-            'gitlab_merge_requests',
-            mergeRequests as unknown as Array<Record<string, unknown>>,
-          );
-          result.mergeRequestsWritten += mergeRequests.length;
-        }
-        if (commits.length > 0) {
-          await ch.insertRows(
-            'gitlab_commits',
-            commits as unknown as Array<Record<string, unknown>>,
-          );
-          result.commitsWritten += commits.length;
-        }
+        result.mergeRequestsWritten += mergeRequestsWritten;
+        result.commitsWritten += commitsWritten;
 
         await db.gitLabProjectSync.update({
           where: { id: ps.id },

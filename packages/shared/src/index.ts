@@ -304,6 +304,9 @@ export type {
   GitHubCommitRow,
 } from './github-commit-adapter';
 
+// Phase 3 — GitLab base URL normalization (web URL → /api/v4 REST root).
+export { gitlabApiBase } from './gitlab-api-base';
+
 // Phase 3 (EI-005) — GitLab MR adapter (all states + approvals + first-review proxy).
 export { GitLabPrAdapter, FakeGitLabPrAdapter } from './gitlab-pr-adapter';
 export type {

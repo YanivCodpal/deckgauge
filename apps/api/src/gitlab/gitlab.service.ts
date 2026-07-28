@@ -1,5 +1,6 @@
 // EI-030 — GitLab service. CRUD on GitLabInstance + GitLabProjectSync.
 import { PrismaClient } from '@deckgauge/db';
+import { gitlabApiBase } from '@deckgauge/shared';
 
 export interface CreateGitLabInstanceInput {
   name: string;
@@ -26,17 +27,11 @@ export class GitLabApiError extends Error {
   }
 }
 
-/**
- * Normalize a GitLab base URL to its REST API root. Users naturally paste the
- * instance web URL (e.g. `https://code.digi.is`), but the REST API lives under
- * `/api/v4`. Without this the code hits the web UI, which returns an HTML login
- * page — that then fails JSON parsing and surfaces as "no projects found".
- * Idempotent: a base that already ends in `/api/vN` is returned untouched.
- */
-export function gitlabApiBase(baseUrl: string): string {
-  const trimmed = baseUrl.replace(/\/+$/, '');
-  return /\/api\/v\d+$/.test(trimmed) ? trimmed : `${trimmed}/api/v4`;
-}
+// Re-exported from @deckgauge/shared so the API create path and the worker
+// sync adapters share one normalization implementation (a prior divergence —
+// the worker path not normalizing — is what left instances hitting the web UI
+// and 404ing). Kept as a named export here for existing importers.
+export { gitlabApiBase };
 
 export class GitLabService {
   constructor(

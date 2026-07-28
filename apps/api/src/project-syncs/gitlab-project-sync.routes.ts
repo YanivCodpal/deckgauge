@@ -7,7 +7,7 @@ const GitLabProjectSyncCreateSchema = z.object({
   gitlabInstanceId: z.string().uuid(),
   projectPath: z.string().min(1),
   syncPrs: z.boolean().default(true),
-  syncCommits: z.boolean().default(false),
+  syncCommits: z.boolean().default(true),
 });
 
 export function gitlabProjectSyncRoutes(deps: { prisma: PrismaClient }) {

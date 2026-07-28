@@ -1,6 +1,7 @@
 // EI-006 — GitLabCommitAdapter.
 import { detectAiAssistance } from './ai-detection';
 import { extractTicketKeys } from './ticket-link-extractor';
+import { gitlabApiBase } from './gitlab-api-base';
 
 export interface GitLabCommitFetchOpts {
   projectPath: string;
@@ -34,7 +35,11 @@ export interface GitLabCommitRow {
 }
 
 export interface GitLabCommitPort {
+  /** Buffers all pages — convenience for callers that want the whole set. */
   fetchCommits(opts: GitLabCommitFetchOpts): Promise<GitLabCommitRow[]>;
+  /** Yields one page at a time so the sync worker never buffers a full repo
+   *  in memory (mirrors the ADO adapter's streamWorkItems). */
+  streamCommits(opts: GitLabCommitFetchOpts): AsyncGenerator<GitLabCommitRow[]>;
 }
 
 interface GitLabCommitAdapterConfig {
@@ -68,19 +73,18 @@ export class GitLabCommitAdapter implements GitLabCommitPort {
   private readonly doFetch: typeof fetch;
 
   constructor(cfg: GitLabCommitAdapterConfig) {
-    this.baseUrl = (cfg.baseUrl ?? 'https://gitlab.com/api/v4').replace(/\/+$/, '');
+    this.baseUrl = gitlabApiBase(cfg.baseUrl ?? 'https://gitlab.com/api/v4');
     this.accessToken = cfg.accessToken;
     this.instanceId = cfg.instanceId;
     this.doFetch = cfg.fetchFn ?? fetch;
   }
 
-  async fetchCommits(opts: GitLabCommitFetchOpts): Promise<GitLabCommitRow[]> {
+  async *streamCommits(opts: GitLabCommitFetchOpts): AsyncGenerator<GitLabCommitRow[]> {
     const perPage = opts.perPage ?? 100;
     const maxPages = opts.maxPages ?? 100;
     const prefixes = opts.ticketPrefixes ?? [];
     const path = encodeProjectPath(opts.projectPath);
 
-    const rows: GitLabCommitRow[] = [];
     for (let page = 1; page <= maxPages; page++) {
       const params = new URLSearchParams({
         with_stats: 'true',
@@ -92,11 +96,14 @@ export class GitLabCommitAdapter implements GitLabCommitPort {
       const url = `${this.baseUrl}/projects/${path}/repository/commits?${params.toString()}`;
       const list = await this.gl<RawCommit[]>(url);
       if (!Array.isArray(list) || list.length === 0) break;
-      for (const c of list) {
-        rows.push(this.transform(opts.projectPath, c, prefixes, opts.refName));
-      }
+      yield list.map((c) => this.transform(opts.projectPath, c, prefixes, opts.refName));
       if (list.length < perPage) break;
     }
+  }
+
+  async fetchCommits(opts: GitLabCommitFetchOpts): Promise<GitLabCommitRow[]> {
+    const rows: GitLabCommitRow[] = [];
+    for await (const batch of this.streamCommits(opts)) rows.push(...batch);
     return rows;
   }
 
@@ -155,5 +162,8 @@ export class FakeGitLabCommitAdapter implements GitLabCommitPort {
   constructor(private readonly seed: GitLabCommitRow[]) {}
   async fetchCommits(_opts: GitLabCommitFetchOpts) {
     return this.seed;
+  }
+  async *streamCommits(_opts: GitLabCommitFetchOpts): AsyncGenerator<GitLabCommitRow[]> {
+    yield this.seed;
   }
 }

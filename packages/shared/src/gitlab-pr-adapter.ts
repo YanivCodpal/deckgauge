@@ -1,6 +1,7 @@
 // EI-005 — GitLabPrAdapter (Merge Requests).
 import { detectAiAssistance } from './ai-detection';
 import { extractTicketKeys } from './ticket-link-extractor';
+import { gitlabApiBase } from './gitlab-api-base';
 
 export interface GitLabPrFetchOpts {
   projectPath: string;
@@ -47,7 +48,11 @@ export interface GitLabMergeRequestRow {
 }
 
 export interface GitLabPrPort {
+  /** Buffers all pages — convenience for callers that want the whole set. */
   fetchMergeRequests(opts: GitLabPrFetchOpts): Promise<GitLabMergeRequestRow[]>;
+  /** Yields one page at a time so the sync worker never buffers a project's
+   *  full MR set in memory (mirrors the ADO adapter's streamWorkItems). */
+  streamMergeRequests(opts: GitLabPrFetchOpts): AsyncGenerator<GitLabMergeRequestRow[]>;
 }
 
 interface GitLabPrAdapterConfig {
@@ -112,19 +117,18 @@ export class GitLabPrAdapter implements GitLabPrPort {
   private readonly doFetch: typeof fetch;
 
   constructor(cfg: GitLabPrAdapterConfig) {
-    this.baseUrl = (cfg.baseUrl ?? 'https://gitlab.com/api/v4').replace(/\/+$/, '');
+    this.baseUrl = gitlabApiBase(cfg.baseUrl ?? 'https://gitlab.com/api/v4');
     this.accessToken = cfg.accessToken;
     this.instanceId = cfg.instanceId;
     this.doFetch = cfg.fetchFn ?? fetch;
   }
 
-  async fetchMergeRequests(opts: GitLabPrFetchOpts): Promise<GitLabMergeRequestRow[]> {
+  async *streamMergeRequests(opts: GitLabPrFetchOpts): AsyncGenerator<GitLabMergeRequestRow[]> {
     const perPage = opts.perPage ?? 100;
     const maxPages = opts.maxPages ?? 100;
     const prefixes = opts.ticketPrefixes ?? [];
     const path = encodeProjectPath(opts.projectPath);
 
-    const rows: GitLabMergeRequestRow[] = [];
     for (let page = 1; page <= maxPages; page++) {
       const params = new URLSearchParams({
         state: 'all',
@@ -137,6 +141,7 @@ export class GitLabPrAdapter implements GitLabPrPort {
       const url = `${this.baseUrl}/projects/${path}/merge_requests?${params.toString()}`;
       const list = await this.gl<RawMr[]>(url);
       if (!Array.isArray(list) || list.length === 0) break;
+      const batch: GitLabMergeRequestRow[] = [];
       for (const mr of list) {
         const approvals = await this.gl<RawApprovals>(
           `${this.baseUrl}/projects/${path}/merge_requests/${mr.iid}/approvals`,
@@ -144,10 +149,16 @@ export class GitLabPrAdapter implements GitLabPrPort {
         const notes = await this.gl<RawNote[]>(
           `${this.baseUrl}/projects/${path}/merge_requests/${mr.iid}/notes?per_page=100&sort=asc&order_by=created_at`,
         );
-        rows.push(this.transform(opts.projectPath, mr, approvals, notes, prefixes));
+        batch.push(this.transform(opts.projectPath, mr, approvals, notes, prefixes));
       }
+      yield batch;
       if (list.length < perPage) break;
     }
+  }
+
+  async fetchMergeRequests(opts: GitLabPrFetchOpts): Promise<GitLabMergeRequestRow[]> {
+    const rows: GitLabMergeRequestRow[] = [];
+    for await (const batch of this.streamMergeRequests(opts)) rows.push(...batch);
     return rows;
   }
 
@@ -235,5 +246,8 @@ export class FakeGitLabPrAdapter implements GitLabPrPort {
   constructor(private readonly seed: GitLabMergeRequestRow[]) {}
   async fetchMergeRequests(_opts: GitLabPrFetchOpts) {
     return this.seed;
+  }
+  async *streamMergeRequests(_opts: GitLabPrFetchOpts): AsyncGenerator<GitLabMergeRequestRow[]> {
+    yield this.seed;
   }
 }

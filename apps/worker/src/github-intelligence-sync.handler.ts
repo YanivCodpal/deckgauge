@@ -61,9 +61,11 @@ interface GhReviewComment {
 interface GhCommit {
   sha: string;
   author: { login: string } | null;
+  committer: { login: string } | null;
   commit: {
     message: string;
-    author: { date: string; email: string };
+    author: { name: string; date: string; email: string };
+    committer: { name: string } | null;
   };
 }
 interface GhWorkflowRun {
@@ -106,6 +108,35 @@ interface GhIssue {
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+// Build a github_commits row. Shared by both write paths (PR-branch commits and
+// default-branch commits) so their column set can't drift. `author_login` is ''
+// when GitHub can't link the commit email to an account (common for external
+// contractors); author_name/email are kept from the commit itself so per-person
+// views can still attribute the work by name/email rather than collapsing every
+// unlinked commit into one blank bucket. committer_* record squash/rebase authorship.
+function buildCommitRow(
+  repoFullName: string,
+  c: GhCommit,
+  ai: { aiAssisted: boolean; confidence: number | null; signals: unknown },
+): Record<string, unknown> {
+  return {
+    id: `${repoFullName}#${c.sha}`,
+    repo_full_name: repoFullName,
+    sha: c.sha,
+    author_login: c.author?.login ?? '',
+    author_name: c.commit.author.name ?? '',
+    author_email: c.commit.author.email,
+    committer_login: c.committer?.login ?? null,
+    committer_name: c.commit.committer?.name ?? '',
+    message: c.commit.message,
+    message_subject: c.commit.message.split(/\r?\n/)[0],
+    committed_at: c.commit.author.date,
+    ai_assisted: ai.aiAssisted ? 1 : 0,
+    ai_confidence: ai.confidence,
+    ai_signals: JSON.stringify(ai.signals),
+  };
 }
 
 export async function runIntelligenceSync(
@@ -191,18 +222,7 @@ export async function runIntelligenceSync(
           branchName: pr.head.ref,
           authorLogin: c.author?.login ?? undefined,
         });
-        prCommitRows.set(c.sha, {
-          id: `${sync.repoFullName}#${c.sha}`,
-          repo_full_name: sync.repoFullName,
-          sha: c.sha,
-          author_login: c.author?.login ?? '',
-          author_email: c.commit.author.email,
-          message: c.commit.message,
-          committed_at: c.commit.author.date,
-          ai_assisted: ai.aiAssisted ? 1 : 0,
-          ai_confidence: ai.confidence,
-          ai_signals: JSON.stringify(ai.signals),
-        });
+        prCommitRows.set(c.sha, buildCommitRow(sync.repoFullName, c, ai));
       }
 
       const { pr: prRow, reviews: reviewRows } = transformGitHubPr({
@@ -281,18 +301,7 @@ export async function runIntelligenceSync(
         branchName: sync.defaultBranch,
         authorLogin: c.author?.login ?? undefined,
       });
-      return {
-        id: `${sync.repoFullName}#${c.sha}`,
-        repo_full_name: sync.repoFullName,
-        sha: c.sha,
-        author_login: c.author?.login ?? '',
-        author_email: c.commit.author.email,
-        message: c.commit.message,
-        committed_at: c.commit.author.date,
-        ai_assisted: ai.aiAssisted ? 1 : 0,
-        ai_confidence: ai.confidence,
-        ai_signals: JSON.stringify(ai.signals),
-      };
+      return buildCommitRow(sync.repoFullName, c, ai);
     });
     if (rows.length > 0) await deps.ch.insertRows('github_commits', rows);
     const maxDate = commits.reduce<Date | null>(
