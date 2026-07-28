@@ -313,6 +313,7 @@ export type {
   GitLabPrPort,
   GitLabPrFetchOpts,
   GitLabMergeRequestRow,
+  GitLabMergeRequestPage,
 } from './gitlab-pr-adapter';
 
 // Phase 3 (EI-006) — GitLab commit adapter with diff stats + merge detection.
@@ -322,6 +323,14 @@ export type {
   GitLabCommitFetchOpts,
   GitLabCommitRow,
 } from './gitlab-commit-adapter';
+
+// Phase 3 — GitLab MR review row shape (parity with GitHub reviews).
+export { buildGitLabReviews } from './gitlab-review-adapter';
+export type { GitLabReviewRow } from './gitlab-review-adapter';
+
+// Phase 3 — GitLab issues adapter (streaming, parity with GitHubIssueRow).
+export { GitLabIssueAdapter, FakeGitLabIssueAdapter } from './gitlab-issue-adapter';
+export type { GitLabIssuePort, GitLabIssueFetchOpts, GitLabIssueRow } from './gitlab-issue-adapter';
 
 // Phase 3 (EI-007) — ADO Repos PR adapter (lists repos, fetches PRs + threads).
 export { AdoPrAdapter, FakeAdoPrAdapter } from './ado-pr-adapter';

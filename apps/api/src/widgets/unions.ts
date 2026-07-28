@@ -47,6 +47,20 @@ const ADO_ISSUES_COLUMNS = `
   sprint_name                                                                       AS sprint_name
 `;
 
+// gitlab_issues: native state ('opened'/'closed' — normalise 'opened' → 'open'
+// so it matches the github leg), no type column (derive from labels the same
+// way as github: 'bug'/'defect' → 'Bug', else 'Other'), assignee_username, no
+// sprint.
+const GITLAB_ISSUES_COLUMNS = `
+  toString(id)                                                                      AS id,
+  created_at                                                                        AS created_at,
+  closed_at                                                                         AS closed_at,
+  if(state = 'opened', 'open', state)                                               AS state,
+  if(hasAny(arrayMap(x -> lowerUTF8(x), labels), ['bug', 'defect']), 'Bug', 'Other') AS type,
+  assignee_username                                                                 AS assignee,
+  CAST(NULL AS Nullable(String))                                                    AS sprint_name
+`;
+
 export function issuesUnion(scope: BoardScope): UnionResult {
   const legs: string[] = [];
   const params: Record<string, unknown> = {};
@@ -60,6 +74,11 @@ export function issuesUnion(scope: BoardScope): UnionResult {
     legs.push(`SELECT ${GITHUB_ISSUES_COLUMNS}, 'github' AS source
       FROM cockpit.github_issues WHERE repo_full_name IN {ghRepos:Array(String)}`);
     params.ghRepos = scope.githubRepoFullNames;
+  }
+  if (scope.gitlabProjectPaths.length) {
+    legs.push(`SELECT ${GITLAB_ISSUES_COLUMNS}, 'gitlab' AS source
+      FROM cockpit.gitlab_issues WHERE project_path IN {glIssuePaths:Array(String)}`);
+    params.glIssuePaths = scope.gitlabProjectPaths;
   }
   if (scope.adoProjects.length) {
     legs.push(`SELECT ${ADO_ISSUES_COLUMNS}, 'ado' AS source
@@ -220,10 +239,11 @@ export function commitsUnion(scope: BoardScope): UnionResult {
 }
 
 // Canonical review shape: reviewer, provider, submitted_at, is_bot, is_approval.
-// github_reviews/ado_reviews are ReplacingMergeTree(synced_at) — FINAL drops
-// re-sync duplicates. ADO has no review bots, so is_bot is constant 0 there;
-// approval is `vote >= 5` (10 = approved, 5 = approved-with-suggestions).
-// gitlab has no reviews table (0 rows) — no leg.
+// github_reviews/ado_reviews/gitlab_reviews are ReplacingMergeTree(synced_at) —
+// FINAL drops re-sync duplicates. ADO has no review bots, so is_bot is constant
+// 0 there; approval is `vote >= 5` (10 = approved, 5 = approved-with-suggestions).
+// gitlab_reviews likewise has no bot signal modeled, so is_bot is constant 0;
+// approval is `state = 'approved'` ('commented' is the other native state).
 const GITHUB_REVIEW_COLUMNS = `
   reviewer_login                              AS reviewer,
   'github'                                    AS provider,
@@ -240,6 +260,14 @@ const ADO_REVIEW_COLUMNS = `
   vote >= 5                                   AS is_approval
 `;
 
+const GITLAB_REVIEW_COLUMNS = `
+  reviewer_username                           AS reviewer,
+  'gitlab'                                    AS provider,
+  submitted_at                                AS submitted_at,
+  toUInt8(0)                                  AS is_bot,
+  state = 'approved'                          AS is_approval
+`;
+
 export function reviewsUnion(scope: BoardScope): UnionResult {
   const legs: string[] = [];
   const params: Record<string, unknown> = {};
@@ -253,6 +281,11 @@ export function reviewsUnion(scope: BoardScope): UnionResult {
     legs.push(`SELECT ${ADO_REVIEW_COLUMNS}
       FROM cockpit.ado_reviews FINAL WHERE project IN {adoProjects:Array(String)}`);
     params.adoProjects = scope.adoProjects;
+  }
+  if (scope.gitlabProjectPaths.length) {
+    legs.push(`SELECT ${GITLAB_REVIEW_COLUMNS}
+      FROM cockpit.gitlab_reviews FINAL WHERE project_path IN {glReviewPaths:Array(String)}`);
+    params.glReviewPaths = scope.gitlabProjectPaths;
   }
   return { sql: legs.length ? legs.join(' UNION ALL ') : null, params };
 }

@@ -28,6 +28,8 @@ export const CATALOG: Readonly<Record<string, CatalogEntry>> = Object.freeze({
   ado_commits:           { sourceType: 'ado',    scopeColumn: 'project' },
   gitlab_merge_requests: { sourceType: 'gitlab', scopeColumn: 'project_path' },
   gitlab_commits:        { sourceType: 'gitlab', scopeColumn: 'project_path' },
+  gitlab_reviews:        { sourceType: 'gitlab', scopeColumn: 'project_path' },
+  gitlab_issues:         { sourceType: 'gitlab', scopeColumn: 'project_path' },
 });
 
 export function isCatalogedTable(name: string): boolean {

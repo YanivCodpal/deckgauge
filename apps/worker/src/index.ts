@@ -14,8 +14,10 @@ import {
   AzureDevOpsRestAdapter,
   GitLabPrAdapter,
   GitLabCommitAdapter,
+  GitLabIssueAdapter,
   FakeGitLabPrAdapter,
   FakeGitLabCommitAdapter,
+  FakeGitLabIssueAdapter,
   JiraIntelligenceAdapter,
   FakeJiraIntelligenceAdapter,
   AdoPrAdapter,
@@ -199,6 +201,17 @@ const gitlabCommitAdapterFactory = (cfg: {
   return new GitLabCommitAdapter(cfg)
 }
 
+const gitlabIssueAdapterFactory = (cfg: {
+  accessToken: string
+  baseUrl?: string
+  instanceId: string
+}) => {
+  if (process.env.USE_FAKE_GITLAB === 'true') {
+    return new FakeGitLabIssueAdapter([])
+  }
+  return new GitLabIssueAdapter(cfg)
+}
+
 const gitlabQueue = new Queue('gitlab-sync', { connection })
 const gitlabWorker = new Worker(
   'gitlab-sync',
@@ -210,6 +223,7 @@ const gitlabWorker = new Worker(
       db,
       gitlabPrAdapterFactory,
       gitlabCommitAdapterFactory,
+      gitlabIssueAdapterFactory,
       chClient,
     )
   },

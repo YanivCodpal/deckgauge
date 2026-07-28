@@ -72,12 +72,12 @@ export const WIDGET_SCOPE_REQUIREMENTS: Record<NewWidgetType, WidgetSourceKind[]
   PR_SIZE_DISTRIBUTION: ['github', 'gitlab', 'ado'],
   MERGE_FREQUENCY_PER_DEV: ['github', 'gitlab', 'ado'],
   REWORK_RATE: ['github', 'gitlab', 'ado'],
-  BUG_RATE: ['jira', 'ado', 'github'],
+  BUG_RATE: ['jira', 'ado', 'github', 'gitlab'],
   ITERATION_PLANNING_ACCURACY: ['jira', 'ado'],
-  VELOCITY_WITH_CONFIDENCE: ['jira', 'ado'],
+  VELOCITY_WITH_CONFIDENCE: ['jira', 'ado', 'gitlab'],
   INITIATIVE_RISK_RADAR: ['jira', 'ado', 'github'],
-  ISSUES_OPENED_VS_CLOSED: ['jira', 'ado', 'github'],
-  WIP_COUNT: ['jira', 'ado', 'github'],
+  ISSUES_OPENED_VS_CLOSED: ['jira', 'ado', 'github', 'gitlab'],
+  WIP_COUNT: ['jira', 'ado', 'github', 'gitlab'],
   TICKET_COVERAGE_RATE: ['github', 'gitlab', 'ado'],
   AI_ASSISTED_PR_PCT: ['github', 'gitlab', 'ado'],
   // github_reviews is github-only; gitlab/ado have no parallel review table.
@@ -86,18 +86,18 @@ export const WIDGET_SCOPE_REQUIREMENTS: Record<NewWidgetType, WidgetSourceKind[]
   BOT_VS_HUMAN: ['github', 'gitlab', 'ado'],
   // Commits per developer; commits exist for all three code providers.
   COMMITS_PER_DEV: ['github', 'gitlab', 'ado'],
-  // github_reviews + ado_reviews; gitlab has no reviews table (0 rows).
-  REVIEWER_PARTICIPATION: ['github', 'ado'],
-  // github_reviews + ado_reviews; gitlab has no reviews table.
-  REVIEW_QUALITY_INDEX: ['github', 'ado'],
-  // github_reviews + ado_reviews; gitlab has no reviews table (mirrors REVIEW_QUALITY_INDEX).
-  REVIEW_QUALITY_TREND: ['github', 'ado'],
+  // github_reviews + ado_reviews + gitlab_reviews.
+  REVIEWER_PARTICIPATION: ['github', 'ado', 'gitlab'],
+  // github_reviews + ado_reviews + gitlab_reviews.
+  REVIEW_QUALITY_INDEX: ['github', 'ado', 'gitlab'],
+  // github_reviews + ado_reviews + gitlab_reviews (mirrors REVIEW_QUALITY_INDEX).
+  REVIEW_QUALITY_TREND: ['github', 'ado', 'gitlab'],
   FLOW_THROUGHPUT_CYCLE: ['jira', 'ado'],
   DELIVERY_TREND_ANNOTATED: ['jira', 'ado'],
   AI_ADOPTION: ['github', 'ado'],
   // Investment-allocation reads canonical issue `type` across all issue
-  // sources (Jira issue_type, ADO work_item_type, GitHub label-derived type).
-  INVESTMENT_ALLOCATION: ['jira', 'ado', 'github'],
+  // sources (Jira issue_type, ADO work_item_type, GitHub/GitLab label-derived type).
+  INVESTMENT_ALLOCATION: ['jira', 'ado', 'github', 'gitlab'],
   // DORA scorecard spans PRs/commits (speed + change-failure) and bug issues
   // (time-to-restore), so any code or issue source makes it partially usable;
   // metrics without a matching source render as "—".

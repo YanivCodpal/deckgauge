@@ -3,8 +3,11 @@ import { PrismaClient } from '@deckgauge/db';
 import type {
   GitLabPrPort,
   GitLabCommitPort,
+  GitLabIssuePort,
   GitLabMergeRequestRow,
+  GitLabReviewRow,
   GitLabCommitRow,
+  GitLabIssueRow,
 } from '@deckgauge/shared';
 import { processGitLabSync } from './gitlab-sync.processor.js';
 
@@ -26,11 +29,19 @@ export type GitLabCommitAdapterFactory = (cfg: {
   instanceId: string;
 }) => GitLabCommitPort;
 
+export type GitLabIssueAdapterFactory = (cfg: {
+  accessToken: string;
+  baseUrl?: string;
+  instanceId: string;
+}) => GitLabIssuePort;
+
 export interface GitLabSyncResult {
   instancesProcessed: number;
   projectsProcessed: number;
   mergeRequestsWritten: number;
+  reviewsWritten: number;
   commitsWritten: number;
+  issuesWritten: number;
   errors: Array<{ instanceId: string; projectPath: string; message: string }>;
 }
 
@@ -43,13 +54,16 @@ export async function handleGitLabSyncJob(
   db: PrismaClient,
   prAdapterFactory: GitLabPrAdapterFactory,
   commitAdapterFactory: GitLabCommitAdapterFactory,
+  issueAdapterFactory: GitLabIssueAdapterFactory,
   ch: ChClient,
 ): Promise<GitLabSyncResult> {
   const result: GitLabSyncResult = {
     instancesProcessed: 0,
     projectsProcessed: 0,
     mergeRequestsWritten: 0,
+    reviewsWritten: 0,
     commitsWritten: 0,
+    issuesWritten: 0,
     errors: [],
   };
 
@@ -85,26 +99,39 @@ export async function handleGitLabSyncJob(
       baseUrl: instance.baseUrl,
       instanceId,
     });
+    const issueAdapter = issueAdapterFactory({
+      accessToken: instance.accessToken,
+      baseUrl: instance.baseUrl,
+      instanceId,
+    });
 
     for (const ps of syncs) {
       try {
         const sinceMrs = ps.lastSyncedAt ?? undefined;
-        const { mergeRequestsWritten, commitsWritten } = await processGitLabSync({
-          projectPath: ps.projectPath,
-          since: sinceMrs,
-          syncCommits: ps.syncCommits,
-          prAdapter,
-          commitAdapter,
-          onMergeRequests: (rows) =>
-            ch.insertRows(
-              'gitlab_merge_requests',
-              rows as unknown as Array<Record<string, unknown>>,
-            ),
-          onCommits: (rows) =>
-            ch.insertRows('gitlab_commits', rows as unknown as Array<Record<string, unknown>>),
-        });
+        const { mergeRequestsWritten, reviewsWritten, commitsWritten, issuesWritten } =
+          await processGitLabSync({
+            projectPath: ps.projectPath,
+            since: sinceMrs,
+            syncCommits: ps.syncCommits,
+            prAdapter,
+            commitAdapter,
+            issueAdapter,
+            onMergeRequests: (rows) =>
+              ch.insertRows(
+                'gitlab_merge_requests',
+                rows as unknown as Array<Record<string, unknown>>,
+              ),
+            onReviews: (rows) =>
+              ch.insertRows('gitlab_reviews', rows as unknown as Array<Record<string, unknown>>),
+            onCommits: (rows) =>
+              ch.insertRows('gitlab_commits', rows as unknown as Array<Record<string, unknown>>),
+            onIssues: (rows) =>
+              ch.insertRows('gitlab_issues', rows as unknown as Array<Record<string, unknown>>),
+          });
         result.mergeRequestsWritten += mergeRequestsWritten;
+        result.reviewsWritten += reviewsWritten;
         result.commitsWritten += commitsWritten;
+        result.issuesWritten += issuesWritten;
 
         await db.gitLabProjectSync.update({
           where: { id: ps.id },
@@ -124,4 +151,4 @@ export async function handleGitLabSyncJob(
   return result;
 }
 
-export type { GitLabMergeRequestRow, GitLabCommitRow };
+export type { GitLabMergeRequestRow, GitLabReviewRow, GitLabCommitRow, GitLabIssueRow };

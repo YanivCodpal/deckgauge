@@ -2,6 +2,7 @@
 import { detectAiAssistance } from './ai-detection';
 import { extractTicketKeys } from './ticket-link-extractor';
 import { gitlabApiBase } from './gitlab-api-base';
+import { buildGitLabReviews, type GitLabReviewRow } from './gitlab-review-adapter';
 
 export interface GitLabPrFetchOpts {
   projectPath: string;
@@ -47,12 +48,19 @@ export interface GitLabMergeRequestRow {
   merge_commit_sha: string | null;
 }
 
+export interface GitLabMergeRequestPage {
+  mergeRequests: GitLabMergeRequestRow[];
+  reviews: GitLabReviewRow[];
+}
+
 export interface GitLabPrPort {
   /** Buffers all pages — convenience for callers that want the whole set. */
   fetchMergeRequests(opts: GitLabPrFetchOpts): Promise<GitLabMergeRequestRow[]>;
   /** Yields one page at a time so the sync worker never buffers a project's
-   *  full MR set in memory (mirrors the ADO adapter's streamWorkItems). */
-  streamMergeRequests(opts: GitLabPrFetchOpts): AsyncGenerator<GitLabMergeRequestRow[]>;
+   *  full MR set in memory (mirrors the ADO adapter's streamWorkItems).
+   *  Each page co-emits the review rows derived from the approvals + notes
+   *  already fetched for that page's MRs. */
+  streamMergeRequests(opts: GitLabPrFetchOpts): AsyncGenerator<GitLabMergeRequestPage>;
 }
 
 interface GitLabPrAdapterConfig {
@@ -88,13 +96,13 @@ interface RawMr {
 }
 
 interface RawApprovals {
-  approved_by: Array<{ user: { username: string } }>;
+  approved_by: Array<{ user: { username: string; name?: string } }>;
 }
 
 interface RawNote {
   system: boolean;
   body: string;
-  author: { username: string };
+  author: { username: string; name?: string };
   created_at: string;
 }
 
@@ -123,7 +131,7 @@ export class GitLabPrAdapter implements GitLabPrPort {
     this.doFetch = cfg.fetchFn ?? fetch;
   }
 
-  async *streamMergeRequests(opts: GitLabPrFetchOpts): AsyncGenerator<GitLabMergeRequestRow[]> {
+  async *streamMergeRequests(opts: GitLabPrFetchOpts): AsyncGenerator<GitLabMergeRequestPage> {
     const perPage = opts.perPage ?? 100;
     const maxPages = opts.maxPages ?? 100;
     const prefixes = opts.ticketPrefixes ?? [];
@@ -141,7 +149,8 @@ export class GitLabPrAdapter implements GitLabPrPort {
       const url = `${this.baseUrl}/projects/${path}/merge_requests?${params.toString()}`;
       const list = await this.gl<RawMr[]>(url);
       if (!Array.isArray(list) || list.length === 0) break;
-      const batch: GitLabMergeRequestRow[] = [];
+      const mergeRequests: GitLabMergeRequestRow[] = [];
+      const reviews: GitLabReviewRow[] = [];
       for (const mr of list) {
         const approvals = await this.gl<RawApprovals>(
           `${this.baseUrl}/projects/${path}/merge_requests/${mr.iid}/approvals`,
@@ -149,16 +158,35 @@ export class GitLabPrAdapter implements GitLabPrPort {
         const notes = await this.gl<RawNote[]>(
           `${this.baseUrl}/projects/${path}/merge_requests/${mr.iid}/notes?per_page=100&sort=asc&order_by=created_at`,
         );
-        batch.push(this.transform(opts.projectPath, mr, approvals, notes, prefixes));
+        mergeRequests.push(this.transform(opts.projectPath, mr, approvals, notes, prefixes));
+        reviews.push(
+          ...buildGitLabReviews({
+            projectPath: opts.projectPath,
+            instanceId: this.instanceId,
+            mrIid: mr.iid,
+            mrAuthorUsername: mr.author.username,
+            approvedBy: approvals.approved_by.map((a) => ({
+              username: a.user.username,
+              name: a.user.name,
+            })),
+            notes: notes.map((n) => ({
+              system: n.system,
+              body: n.body,
+              authorUsername: n.author.username,
+              authorName: n.author.name,
+              createdAt: n.created_at,
+            })),
+          }),
+        );
       }
-      yield batch;
+      yield { mergeRequests, reviews };
       if (list.length < perPage) break;
     }
   }
 
   async fetchMergeRequests(opts: GitLabPrFetchOpts): Promise<GitLabMergeRequestRow[]> {
     const rows: GitLabMergeRequestRow[] = [];
-    for await (const batch of this.streamMergeRequests(opts)) rows.push(...batch);
+    for await (const page of this.streamMergeRequests(opts)) rows.push(...page.mergeRequests);
     return rows;
   }
 
@@ -247,7 +275,7 @@ export class FakeGitLabPrAdapter implements GitLabPrPort {
   async fetchMergeRequests(_opts: GitLabPrFetchOpts) {
     return this.seed;
   }
-  async *streamMergeRequests(_opts: GitLabPrFetchOpts): AsyncGenerator<GitLabMergeRequestRow[]> {
-    yield this.seed;
+  async *streamMergeRequests(_opts: GitLabPrFetchOpts): AsyncGenerator<GitLabMergeRequestPage> {
+    yield { mergeRequests: this.seed, reviews: [] };
   }
 }

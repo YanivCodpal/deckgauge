@@ -11,7 +11,8 @@ const DEFAULT_WEEKS = 12;
 export function buildReviewQualityIndexSql({ config, scope }: BuilderInputs): BuiltSql | null {
   const hasGh = scope.githubRepoFullNames.length > 0;
   const hasAdo = scope.adoProjects.length > 0;
-  if (!hasGh && !hasAdo) return null;
+  const hasGl = scope.gitlabProjectPaths.length > 0;
+  if (!hasGh && !hasAdo && !hasGl) return null;
 
   const weeks = resolveWeeks((config as { weeks?: unknown }).weeks, DEFAULT_WEEKS);
   const { from, to } = resolvePeriod(config, Date.now, weeks * 7);
@@ -62,6 +63,28 @@ export function buildReviewQualityIndexSql({ config, scope }: BuilderInputs): Bu
       WHERE pr.project IN {adoProjects:Array(String)}
         AND pr.status = 'completed'
         AND pr.created_at >= {from:DateTime} AND pr.created_at < {to:DateTime}`);
+  }
+
+  if (hasGl) {
+    params.glPaths = scope.gitlabProjectPaths;
+    legs.push(`
+      SELECT
+        dateDiff('minute', mr.created_at, mr.merged_at)                 AS open_min,
+        (length(mr.linked_ticket_keys) > 0)                            AS has_ticket,
+        coalesce(rv.has_approval, 0)                                   AS has_approval,
+        coalesce(rv.has_comment, 0)                                    AS has_comment
+      FROM cockpit.gitlab_merge_requests AS mr FINAL
+      LEFT JOIN (
+        SELECT project_path, merge_request_iid,
+          max(reviewer_username != mr_author_username AND state = 'approved')                          AS has_approval,
+          max(reviewer_username != mr_author_username AND (state = 'commented' OR comment_count > 0))   AS has_comment
+        FROM cockpit.gitlab_reviews FINAL
+        WHERE project_path IN {glPaths:Array(String)}
+        GROUP BY project_path, merge_request_iid
+      ) AS rv ON rv.project_path = mr.project_path AND rv.merge_request_iid = mr.iid
+      WHERE mr.project_path IN {glPaths:Array(String)}
+        AND mr.state = 'merged'
+        AND mr.created_at >= {from:DateTime} AND mr.created_at < {to:DateTime}`);
   }
 
   return {
